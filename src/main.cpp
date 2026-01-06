@@ -31,6 +31,19 @@
 #include <time.h>
 
 // ========== CONFIGURAÇÕES SUPABASE ==========
+// ⚠️ ATENÇÃO: CREDENCIAIS PRIVADAS
+// ⚠️ ESTE REPOSITÓRIO DEVE SER MANTIDO COMO PRIVADO
+// ⚠️ NÃO compartilhe estas credenciais publicamente
+// 
+// IMPORTANTE: Estas são credenciais sensíveis que controlam
+// o acesso ao banco de dados Supabase. Mantenha-as seguras!
+//
+// Para configurar suas próprias credenciais:
+// 1. Acesse https://app.supabase.com
+// 2. Vá em Settings > API do seu projeto
+// 3. Copie a URL e a chave anon/public
+// 4. Substitua os valores abaixo
+//
 const char* SUPABASE_URL = "https://mkoqceekhnkpviixqnnk.supabase.co";
 const char* SUPABASE_KEY = "sb_publishable_HLUfLEw2UuIWjzd5LfqLkw_oaodzV7V";
 const char* SENHA_AP = "12345678";                  // Senha da rede de configuração (mínimo 8 caracteres)
