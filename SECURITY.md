@@ -75,8 +75,9 @@ const char* SUPABASE_KEY = "sua_chave_anon_key_aqui";
 
 **⚠️ ATENÇÃO:**
 - A chave no código é uma chave pública (anon key) do Supabase
-- Mesmo sendo "pública", deve ser protegida junto com o código
-- Configure Row Level Security (RLS) no Supabase para proteção adicional
+- **É ACEITÁVEL ter credenciais hardcoded APENAS se o repositório for PRIVADO**
+- Para repositórios privados: Configure Row Level Security (RLS) no Supabase para proteção adicional
+- Para produção em larga escala: Considere usar variáveis de ambiente ou configuração externa
 - Monitore uso da API para detectar acessos não autorizados
 
 ---
