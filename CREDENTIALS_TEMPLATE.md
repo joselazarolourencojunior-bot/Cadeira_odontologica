@@ -18,7 +18,7 @@ Este é um arquivo de TEMPLATE. As credenciais aqui são apenas exemplos.
    - Copie: Project URL e anon/public key
 
 ### 2. Atualize o arquivo `src/main.cpp`
-   - Localize as linhas 34-35
+   - Localize as linhas 47-48
    - Substitua pelos seus valores reais
 
 ### 3. Compile e faça upload
@@ -63,7 +63,7 @@ const char* SENHA_AP = "12345678";
 ## 🗂️ Arquivos que Contêm Credenciais
 
 1. **src/main.cpp**
-   - Linhas 34-36
+   - Linhas 47-48
    - Configurações principais do Supabase
 
 ---

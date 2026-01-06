@@ -226,4 +226,4 @@ Após tornar o repositório privado, verifique:
 
 ---
 
-**Última atualização:** 06 de Janeiro de 2026
+**Última atualização:** 06 de Janeiro de 2025

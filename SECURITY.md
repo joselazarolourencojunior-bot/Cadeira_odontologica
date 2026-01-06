@@ -65,15 +65,16 @@ Este repositório contém:
 ### 4. Gerenciamento de Chaves API
 
 **Localização das credenciais no código:**
-- `src/main.cpp` - linhas 34-35
+- `src/main.cpp` - linhas 47-48
 
 ```cpp
-const char* SUPABASE_URL = "https://mkoqceekhnkpviixqnnk.supabase.co";
-const char* SUPABASE_KEY = "sb_publishable_HLUfLEw2UuIWjzd5LfqLkw_oaodzV7V";
+// Exemplo com placeholders - NÃO use estes valores
+const char* SUPABASE_URL = "https://seu-projeto.supabase.co";
+const char* SUPABASE_KEY = "sua_chave_anon_key_aqui";
 ```
 
 **⚠️ ATENÇÃO:**
-- Esta é uma chave pública (anon key) do Supabase
+- A chave no código é uma chave pública (anon key) do Supabase
 - Mesmo sendo "pública", deve ser protegida junto com o código
 - Configure Row Level Security (RLS) no Supabase para proteção adicional
 - Monitore uso da API para detectar acessos não autorizados
@@ -137,6 +138,6 @@ Antes de fazer qualquer commit ou push, verifique:
 
 ## 📅 Última Atualização
 
-**Data:** 06 de Janeiro de 2026
+**Data:** 06 de Janeiro de 2025
 
 **Revisão:** A política de segurança deve ser revisada a cada 6 meses ou quando houver mudanças significativas no projeto.
