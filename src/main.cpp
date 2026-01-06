@@ -2067,6 +2067,22 @@ void monitoraSistema() {
   }
   Serial.print("Horimetro: "); Serial.println(horimetro);
   Serial.print("Cadeira Habilitada: "); Serial.println(cadeiraHabilitada ? "SIM" : "NAO");
+  
+  // Contadores de tempo para próximas atualizações
+  unsigned long tempoAtual = millis();
+  unsigned long tempoAteProximoHorimetro = 0;
+  unsigned long tempoAteProximaVerificacao = 0;
+  
+  if (tempoAtual - ultimaAtualizacaoSupabase < INTERVALO_ATUALIZACAO_SUPABASE) {
+    tempoAteProximoHorimetro = (INTERVALO_ATUALIZACAO_SUPABASE - (tempoAtual - ultimaAtualizacaoSupabase)) / 1000;
+  }
+  
+  if (tempoAtual - ultimaVerificacaoStatus < INTERVALO_VERIFICACAO_STATUS) {
+    tempoAteProximaVerificacao = (INTERVALO_VERIFICACAO_STATUS - (tempoAtual - ultimaVerificacaoStatus)) / 1000;
+  }
+  
+  Serial.print("Proximo envio horimetro: "); Serial.print(tempoAteProximoHorimetro); Serial.println("s");
+  Serial.print("Proxima verificacao status: "); Serial.print(tempoAteProximaVerificacao); Serial.println("s");
   Serial.println("--------------------------------");
 }
 
