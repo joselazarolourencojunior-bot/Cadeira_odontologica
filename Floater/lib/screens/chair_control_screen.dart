@@ -977,10 +977,12 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
 
                 // Visualização da Cadeira com Controles Integrados
                 Center(
-                  child: Consumer<BluetoothService>(
-                    builder: (context, bluetoothService, child) =>
+                  child: Consumer2<BluetoothService, MqttService>(
+                    builder: (context, bluetoothService, mqttService, child) =>
                         ChairVisualization(
-                          chairState: bluetoothService.chairState,
+                          chairState: bluetoothService.isConnected
+                              ? bluetoothService.chairState
+                              : mqttService.chairState,
                           onReflectorToggle: () => _executeCommand(
                             context,
                             bluetoothService,

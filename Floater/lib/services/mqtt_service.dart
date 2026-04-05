@@ -16,6 +16,7 @@ class MqttService extends ChangeNotifier {
   late final String _sessionId = DateTime.now().millisecondsSinceEpoch
       .toString();
   late String _lastChairTopicPrefix;
+  final Map<String, Timer> _rxWatchdogs = {};
 
   MqttService({required SettingsService settingsService})
     : _settingsService = settingsService {
@@ -39,6 +40,7 @@ class MqttService extends ChangeNotifier {
   }
 
   String get _clientId => 'APP-$_chairTopicPrefix-$_sessionId';
+  String get _commandTopic => '$_chairTopicPrefix/command';
   String get _statusTopic => '$_chairTopicPrefix/status';
 
   bool get isConnected => _isConnected;
@@ -97,6 +99,7 @@ class MqttService extends ChangeNotifier {
         _isConnecting = false;
 
         // Subscrever aos tópicos
+        _client!.subscribe(_commandTopic, MqttQos.atMostOnce);
         _client!.subscribe(_statusTopic, MqttQos.atMostOnce);
 
         // Configurar listener para mensagens recebidas
@@ -122,6 +125,10 @@ class MqttService extends ChangeNotifier {
     }
     _isConnected = false;
     _isConnecting = false;
+    for (final timer in _rxWatchdogs.values) {
+      timer.cancel();
+    }
+    _rxWatchdogs.clear();
     notifyListeners();
   }
 
@@ -150,25 +157,115 @@ class MqttService extends ChangeNotifier {
     if (confirmation == 'SA:ON') {
       _chairState.seatUpOn = true;
       _chairState.seatDownOn = false;
+      _armWatchdog('seat', () {
+        _chairState.seatUpOn = false;
+        _chairState.seatDownOn = false;
+      });
     } else if (confirmation == 'DA:ON') {
       _chairState.seatDownOn = true;
       _chairState.seatUpOn = false;
-    } else if (confirmation == 'SE:ON') {
+      _armWatchdog('seat', () {
+        _chairState.seatUpOn = false;
+        _chairState.seatDownOn = false;
+      });
+    } else if (confirmation == 'DE:ON') {
       _chairState.backUpOn = true;
       _chairState.backDownOn = false;
-    } else if (confirmation == 'DE:ON') {
+      _armWatchdog('back', () {
+        _chairState.backUpOn = false;
+        _chairState.backDownOn = false;
+      });
+    } else if (confirmation == 'SE:ON') {
       _chairState.backDownOn = true;
       _chairState.backUpOn = false;
+      _armWatchdog('back', () {
+        _chairState.backUpOn = false;
+        _chairState.backDownOn = false;
+      });
     } else if (confirmation == 'SP:ON') {
       _chairState.upperLegsOn = true;
       _chairState.lowerLegsOn = false;
+      _armWatchdog('legs', () {
+        _chairState.upperLegsOn = false;
+        _chairState.lowerLegsOn = false;
+      });
     } else if (confirmation == 'DP:ON') {
       _chairState.lowerLegsOn = true;
       _chairState.upperLegsOn = false;
+      _armWatchdog('legs', () {
+        _chairState.upperLegsOn = false;
+        _chairState.lowerLegsOn = false;
+      });
     } else if (confirmation == 'RF:ON') {
       _chairState.reflectorOn = true;
     } else if (confirmation == 'RF:OFF') {
       _chairState.reflectorOn = false;
+    } else if (confirmation == ChairCommand.seatUp) {
+      _chairState.seatUpOn = true;
+      _chairState.seatDownOn = false;
+      _armWatchdog('seat', () {
+        _chairState.seatUpOn = false;
+        _chairState.seatDownOn = false;
+      });
+    } else if (confirmation == ChairCommand.seatDown) {
+      _chairState.seatDownOn = true;
+      _chairState.seatUpOn = false;
+      _armWatchdog('seat', () {
+        _chairState.seatUpOn = false;
+        _chairState.seatDownOn = false;
+      });
+    } else if (confirmation == ChairCommand.backUp) {
+      _chairState.backUpOn = true;
+      _chairState.backDownOn = false;
+      _armWatchdog('back', () {
+        _chairState.backUpOn = false;
+        _chairState.backDownOn = false;
+      });
+    } else if (confirmation == ChairCommand.backDown) {
+      _chairState.backDownOn = true;
+      _chairState.backUpOn = false;
+      _armWatchdog('back', () {
+        _chairState.backUpOn = false;
+        _chairState.backDownOn = false;
+      });
+    } else if (confirmation == ChairCommand.upperLegs) {
+      _chairState.upperLegsOn = true;
+      _chairState.lowerLegsOn = false;
+      _armWatchdog('legs', () {
+        _chairState.upperLegsOn = false;
+        _chairState.lowerLegsOn = false;
+      });
+    } else if (confirmation == ChairCommand.lowerLegs) {
+      _chairState.lowerLegsOn = true;
+      _chairState.upperLegsOn = false;
+      _armWatchdog('legs', () {
+        _chairState.upperLegsOn = false;
+        _chairState.lowerLegsOn = false;
+      });
+    } else if (confirmation == ChairCommand.gynecologicalPosition ||
+        confirmation == 'VZ:OK') {
+      _chairState.isMovingToGineco = true;
+      _chairState.isMovingToParto = false;
+    } else if (confirmation == ChairCommand.birthPosition ||
+        confirmation == 'PT:OK') {
+      _chairState.isMovingToParto = true;
+      _chairState.isMovingToGineco = false;
+    } else if (confirmation == 'VZ:OFF') {
+      _chairState.isMovingToGineco = false;
+    } else if (confirmation == 'PT:OFF') {
+      _chairState.isMovingToParto = false;
+    } else if (confirmation == ChairCommand.stop ||
+        confirmation == ChairCommand.stopAll ||
+        confirmation == 'STOP:OK') {
+      _chairState.backUpOn = false;
+      _chairState.backDownOn = false;
+      _chairState.seatUpOn = false;
+      _chairState.seatDownOn = false;
+      _chairState.upperLegsOn = false;
+      _chairState.lowerLegsOn = false;
+      _rxWatchdogs.remove('seat')?.cancel();
+      _rxWatchdogs.remove('back')?.cancel();
+      _rxWatchdogs.remove('legs')?.cancel();
     } else if (confirmation == 'VZ:DONE' ||
         confirmation == 'PT:DONE' ||
         confirmation == 'M1:DONE') {
@@ -179,6 +276,11 @@ class MqttService extends ChangeNotifier {
       _chairState.seatDownOn = false;
       _chairState.upperLegsOn = false;
       _chairState.lowerLegsOn = false;
+      _chairState.isMovingToGineco = false;
+      _chairState.isMovingToParto = false;
+      _rxWatchdogs.remove('seat')?.cancel();
+      _rxWatchdogs.remove('back')?.cancel();
+      _rxWatchdogs.remove('legs')?.cancel();
     } else if (confirmation.contains(':LIMIT')) {
       // Limite atingido - para o motor correspondente
       if (confirmation.startsWith('DE:')) _chairState.backDownOn = false;
@@ -196,9 +298,22 @@ class MqttService extends ChangeNotifier {
       _chairState.upperLegsOn = false;
       _chairState.lowerLegsOn = false;
       _chairState.reflectorOn = false;
+      _chairState.isMovingToGineco = false;
+      _chairState.isMovingToParto = false;
+      _rxWatchdogs.remove('seat')?.cancel();
+      _rxWatchdogs.remove('back')?.cancel();
+      _rxWatchdogs.remove('legs')?.cancel();
     }
 
     notifyListeners();
+  }
+
+  void _armWatchdog(String key, VoidCallback clear) {
+    _rxWatchdogs.remove(key)?.cancel();
+    _rxWatchdogs[key] = Timer(const Duration(milliseconds: 900), () {
+      clear();
+      notifyListeners();
+    });
   }
 
   void _onConnected() {
@@ -224,16 +339,24 @@ class MqttService extends ChangeNotifier {
       recMess.payload.message,
     );
 
-    // Processar mensagem recebida
-    if (event[0].topic == _statusTopic) {
-      // Status is JSON from ESP32
+    final topic = event[0].topic;
+
+    if (topic == _statusTopic) {
       try {
-        final statusJson = jsonDecode(payload);
-        _chairState = ChairState.fromJson(statusJson);
-        notifyListeners();
-      } catch (e) {
-        debugPrint('Erro ao processar status MQTT: $e');
-      }
+        final decoded = jsonDecode(payload);
+        if (decoded is Map<String, dynamic>) {
+          _chairState = ChairState.fromJson(decoded);
+          notifyListeners();
+          return;
+        }
+      } catch (_) {}
+      updateChairState(payload);
+      return;
+    }
+
+    if (topic == _commandTopic) {
+      updateChairState(payload);
+      return;
     }
   }
 
