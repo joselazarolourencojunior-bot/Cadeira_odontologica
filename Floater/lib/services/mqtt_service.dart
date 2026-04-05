@@ -157,6 +157,7 @@ class MqttService extends ChangeNotifier {
     if (confirmation == 'SA:ON') {
       _chairState.seatUpOn = true;
       _chairState.seatDownOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('seat', () {
         _chairState.seatUpOn = false;
         _chairState.seatDownOn = false;
@@ -164,6 +165,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == 'DA:ON') {
       _chairState.seatDownOn = true;
       _chairState.seatUpOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('seat', () {
         _chairState.seatUpOn = false;
         _chairState.seatDownOn = false;
@@ -171,6 +173,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == 'DE:ON') {
       _chairState.backUpOn = true;
       _chairState.backDownOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('back', () {
         _chairState.backUpOn = false;
         _chairState.backDownOn = false;
@@ -178,6 +181,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == 'SE:ON') {
       _chairState.backDownOn = true;
       _chairState.backUpOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('back', () {
         _chairState.backUpOn = false;
         _chairState.backDownOn = false;
@@ -185,6 +189,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == 'SP:ON') {
       _chairState.upperLegsOn = true;
       _chairState.lowerLegsOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('legs', () {
         _chairState.upperLegsOn = false;
         _chairState.lowerLegsOn = false;
@@ -192,6 +197,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == 'DP:ON') {
       _chairState.lowerLegsOn = true;
       _chairState.upperLegsOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('legs', () {
         _chairState.upperLegsOn = false;
         _chairState.lowerLegsOn = false;
@@ -203,6 +209,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == ChairCommand.seatUp) {
       _chairState.seatUpOn = true;
       _chairState.seatDownOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('seat', () {
         _chairState.seatUpOn = false;
         _chairState.seatDownOn = false;
@@ -210,6 +217,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == ChairCommand.seatDown) {
       _chairState.seatDownOn = true;
       _chairState.seatUpOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('seat', () {
         _chairState.seatUpOn = false;
         _chairState.seatDownOn = false;
@@ -217,6 +225,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == ChairCommand.backUp) {
       _chairState.backUpOn = true;
       _chairState.backDownOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('back', () {
         _chairState.backUpOn = false;
         _chairState.backDownOn = false;
@@ -224,6 +233,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == ChairCommand.backDown) {
       _chairState.backDownOn = true;
       _chairState.backUpOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('back', () {
         _chairState.backUpOn = false;
         _chairState.backDownOn = false;
@@ -231,6 +241,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == ChairCommand.upperLegs) {
       _chairState.upperLegsOn = true;
       _chairState.lowerLegsOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('legs', () {
         _chairState.upperLegsOn = false;
         _chairState.lowerLegsOn = false;
@@ -238,6 +249,7 @@ class MqttService extends ChangeNotifier {
     } else if (confirmation == ChairCommand.lowerLegs) {
       _chairState.lowerLegsOn = true;
       _chairState.upperLegsOn = false;
+      _chairState.shouldStopAllTimers = false;
       _armWatchdog('legs', () {
         _chairState.upperLegsOn = false;
         _chairState.lowerLegsOn = false;
@@ -283,12 +295,43 @@ class MqttService extends ChangeNotifier {
       _rxWatchdogs.remove('legs')?.cancel();
     } else if (confirmation.contains(':LIMIT')) {
       // Limite atingido - para o motor correspondente
-      if (confirmation.startsWith('DE:')) _chairState.backDownOn = false;
-      if (confirmation.startsWith('SE:')) _chairState.backUpOn = false;
-      if (confirmation.startsWith('SA:')) _chairState.seatUpOn = false;
-      if (confirmation.startsWith('DA:')) _chairState.seatDownOn = false;
-      if (confirmation.startsWith('SP:')) _chairState.upperLegsOn = false;
-      if (confirmation.startsWith('DP:')) _chairState.lowerLegsOn = false;
+      if (confirmation.startsWith('DE:')) {
+        _chairState.backDownOn = false;
+        _chairState.backDownLimit = true;
+        _armLimitClear(
+          'backDownLimit',
+          () => _chairState.backDownLimit = false,
+        );
+      }
+      if (confirmation.startsWith('SE:')) {
+        _chairState.backUpOn = false;
+        _chairState.backUpLimit = true;
+        _armLimitClear('backUpLimit', () => _chairState.backUpLimit = false);
+      }
+      if (confirmation.startsWith('SA:')) {
+        _chairState.seatUpOn = false;
+        _chairState.seatUpLimit = true;
+        _armLimitClear('seatUpLimit', () => _chairState.seatUpLimit = false);
+      }
+      if (confirmation.startsWith('DA:')) {
+        _chairState.seatDownOn = false;
+        _chairState.seatDownLimit = true;
+        _armLimitClear(
+          'seatDownLimit',
+          () => _chairState.seatDownLimit = false,
+        );
+      }
+      if (confirmation.startsWith('SP:')) {
+        _chairState.upperLegsOn = false;
+        _chairState.legUpLimit = true;
+        _armLimitClear('legUpLimit', () => _chairState.legUpLimit = false);
+      }
+      if (confirmation.startsWith('DP:')) {
+        _chairState.lowerLegsOn = false;
+        _chairState.legDownLimit = true;
+        _armLimitClear('legDownLimit', () => _chairState.legDownLimit = false);
+      }
+      _chairState.shouldStopAllTimers = true;
     } else if (confirmation == 'AT_SEG:OK') {
       // Emergência ativada - desliga tudo
       _chairState.backUpOn = false;
@@ -311,6 +354,14 @@ class MqttService extends ChangeNotifier {
   void _armWatchdog(String key, VoidCallback clear) {
     _rxWatchdogs.remove(key)?.cancel();
     _rxWatchdogs[key] = Timer(const Duration(milliseconds: 900), () {
+      clear();
+      notifyListeners();
+    });
+  }
+
+  void _armLimitClear(String key, VoidCallback clear) {
+    _rxWatchdogs.remove(key)?.cancel();
+    _rxWatchdogs[key] = Timer(const Duration(seconds: 2), () {
       clear();
       notifyListeners();
     });

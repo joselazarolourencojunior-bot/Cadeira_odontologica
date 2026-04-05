@@ -26,12 +26,19 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
   bool _chairIdUpdated = false;
 
   BluetoothService? _bluetoothService;
+  MqttService? _mqttService;
   bool _lastBackUpLimit = false;
   bool _lastBackDownLimit = false;
   bool _lastSeatUpLimit = false;
   bool _lastSeatDownLimit = false;
   bool _lastLegUpLimit = false;
   bool _lastLegDownLimit = false;
+  bool _mqttLastBackUpLimit = false;
+  bool _mqttLastBackDownLimit = false;
+  bool _mqttLastSeatUpLimit = false;
+  bool _mqttLastSeatDownLimit = false;
+  bool _mqttLastLegUpLimit = false;
+  bool _mqttLastLegDownLimit = false;
 
   @override
   void initState() {
@@ -40,6 +47,7 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _attachBluetoothListener();
+      _attachMqttListener();
       _initMqtt();
     });
   }
@@ -47,6 +55,7 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
   @override
   void dispose() {
     _bluetoothService?.removeListener(_onBluetoothChanged);
+    _mqttService?.removeListener(_onMqttChanged);
     super.dispose();
   }
 
@@ -57,6 +66,58 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     _bluetoothService = bluetooth;
     _syncLastLimitSnapshot(bluetooth);
     bluetooth.addListener(_onBluetoothChanged);
+  }
+
+  void _attachMqttListener() {
+    _mqttService?.removeListener(_onMqttChanged);
+
+    final mqtt = context.read<MqttService>();
+    _mqttService = mqtt;
+    _syncLastMqttLimitSnapshot(mqtt);
+    mqtt.addListener(_onMqttChanged);
+  }
+
+  void _syncLastMqttLimitSnapshot(MqttService mqtt) {
+    final state = mqtt.chairState;
+    _mqttLastBackUpLimit = state.backUpLimit;
+    _mqttLastBackDownLimit = state.backDownLimit;
+    _mqttLastSeatUpLimit = state.seatUpLimit;
+    _mqttLastSeatDownLimit = state.seatDownLimit;
+    _mqttLastLegUpLimit = state.legUpLimit;
+    _mqttLastLegDownLimit = state.legDownLimit;
+  }
+
+  void _onMqttChanged() {
+    if (!mounted) return;
+    if ((_bluetoothService?.isConnected ?? false) == true) return;
+
+    final mqtt = _mqttService;
+    if (mqtt == null) return;
+    final state = mqtt.chairState;
+
+    String? message;
+    if ((!_mqttLastBackUpLimit && state.backUpLimit) ||
+        (!_mqttLastBackDownLimit && state.backDownLimit)) {
+      message = 'Limite do encosto atingido';
+    } else if ((!_mqttLastSeatUpLimit && state.seatUpLimit) ||
+        (!_mqttLastSeatDownLimit && state.seatDownLimit)) {
+      message = 'Limite do assento atingido';
+    } else if ((!_mqttLastLegUpLimit && state.legUpLimit) ||
+        (!_mqttLastLegDownLimit && state.legDownLimit)) {
+      message = 'Limite da perneira atingido';
+    }
+
+    _mqttLastBackUpLimit = state.backUpLimit;
+    _mqttLastBackDownLimit = state.backDownLimit;
+    _mqttLastSeatUpLimit = state.seatUpLimit;
+    _mqttLastSeatDownLimit = state.seatDownLimit;
+    _mqttLastLegUpLimit = state.legUpLimit;
+    _mqttLastLegDownLimit = state.legDownLimit;
+
+    if (message != null) {
+      debugPrint('🚨 $message (MQTT)');
+      _notifyLimitReached(message);
+    }
   }
 
   void _ensureBluetoothListener(BluetoothService bluetooth) {
