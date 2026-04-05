@@ -6,8 +6,10 @@ import '../models/chair_settings.dart';
 class SettingsService extends ChangeNotifier {
   ChairSettings _settings = ChairSettings();
   DateTime? _sessionStartTime;
+  String? _bluetoothSerial;
 
   ChairSettings get settings => _settings;
+  String? get bluetoothSerial => _bluetoothSerial;
 
   // Carregar configurações salvas
   Future<void> loadSettings() async {
@@ -96,6 +98,13 @@ class SettingsService extends ChangeNotifier {
   Future<void> setChairSerial(String chairSerial) async {
     _settings.chairSerial = chairSerial;
     await saveSettings();
+    notifyListeners();
+  }
+
+  void setBluetoothSerial(String? bluetoothSerial) {
+    final next = bluetoothSerial?.trim();
+    if (_bluetoothSerial == next) return;
+    _bluetoothSerial = next;
     notifyListeners();
   }
 }

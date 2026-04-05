@@ -66,6 +66,7 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     _bluetoothService = bluetooth;
     _syncLastLimitSnapshot(bluetooth);
     bluetooth.addListener(_onBluetoothChanged);
+    _syncBluetoothSerial(bluetooth);
   }
 
   void _attachMqttListener() {
@@ -126,6 +127,13 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     _bluetoothService = bluetooth;
     _syncLastLimitSnapshot(bluetooth);
     bluetooth.addListener(_onBluetoothChanged);
+    _syncBluetoothSerial(bluetooth);
+  }
+
+  void _syncBluetoothSerial(BluetoothService bluetooth) {
+    final settingsService = context.read<SettingsService>();
+    final chairId = bluetooth.isConnected ? bluetooth.chairUniqueId : null;
+    settingsService.setBluetoothSerial(chairId?.toUpperCase());
   }
 
   void _syncLastLimitSnapshot(BluetoothService bluetooth) {
@@ -142,6 +150,7 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     if (!mounted) return;
     final bluetooth = _bluetoothService;
     if (bluetooth == null) return;
+    _syncBluetoothSerial(bluetooth);
 
     final state = bluetooth.chairState;
 
@@ -557,6 +566,7 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     final mqttIsConnected = mqtt.isConnected;
     final mqttIsConnecting = mqtt.isConnecting;
     final mqttError = mqtt.lastError;
+    final mqttHasSerial = mqtt.hasValidSerial;
 
     // Determina o status geral
     String statusText;
@@ -657,18 +667,28 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
               children: [
                 Expanded(
                   child: _buildStatusIndicator(
-                    icon: mqttIsConnected
-                        ? Icons.wifi_tethering
-                        : (mqttIsConnecting
-                              ? Icons.wifi_tethering_off
-                              : Icons.wifi_off),
+                    icon: mqttHasSerial
+                        ? (mqttIsConnected
+                              ? Icons.wifi_tethering
+                              : (mqttIsConnecting
+                                    ? Icons.wifi_tethering_off
+                                    : Icons.wifi_off))
+                        : Icons.settings,
                     label: 'MQTT (RX)',
-                    value: mqttIsConnected
-                        ? 'Conectado'
-                        : (mqttIsConnecting ? 'Conectando' : 'Desconectado'),
-                    color: mqttIsConnected
-                        ? Colors.teal
-                        : (mqttIsConnecting ? Colors.orange : Colors.grey),
+                    value: mqttHasSerial
+                        ? (mqttIsConnected
+                              ? 'Conectado'
+                              : (mqttIsConnecting
+                                    ? 'Conectando'
+                                    : 'Desconectado'))
+                        : 'Sem SERIAL',
+                    color: mqttHasSerial
+                        ? (mqttIsConnected
+                              ? Colors.teal
+                              : (mqttIsConnecting
+                                    ? Colors.orange
+                                    : Colors.grey))
+                        : Colors.orange,
                     isActive: mqttIsConnected,
                   ),
                 ),

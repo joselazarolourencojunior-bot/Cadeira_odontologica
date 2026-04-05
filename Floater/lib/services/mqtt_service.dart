@@ -30,7 +30,7 @@ class MqttService extends ChangeNotifier {
 
   // Tópicos MQTT - usando serial da cadeira
   String get _chairTopicPrefix {
-    final serial = _settingsService.settings.chairSerial.trim();
+    final serial = _settingsService.bluetoothSerial?.trim() ?? '';
     if (serial.isEmpty) return 'CADEIRA-DESCONHECIDA';
 
     final normalized = serial.toUpperCase();
@@ -47,6 +47,8 @@ class MqttService extends ChangeNotifier {
   bool get isConnecting => _isConnecting;
   ChairState get chairState => _chairState;
   String? get lastError => _lastError;
+  bool get hasValidSerial =>
+      (_settingsService.bluetoothSerial?.trim().isNotEmpty ?? false);
 
   @override
   void dispose() {
@@ -61,6 +63,13 @@ class MqttService extends ChangeNotifier {
     if (_isConnected || _isConnecting) {
       disconnect();
     }
+    if (!hasValidSerial) {
+      _lastError = 'Aguardando Bluetooth para obter SERIAL e habilitar MQTT';
+      _isConnected = false;
+      _isConnecting = false;
+      notifyListeners();
+      return;
+    }
     Future.microtask(() {
       connect();
     });
@@ -69,6 +78,13 @@ class MqttService extends ChangeNotifier {
   /// Conecta ao broker MQTT remoto
   Future<void> connect() async {
     if (_isConnected || _isConnecting) return;
+    if (!hasValidSerial) {
+      _lastError = 'Aguardando Bluetooth para obter SERIAL e habilitar MQTT';
+      _isConnected = false;
+      _isConnecting = false;
+      notifyListeners();
+      return;
+    }
 
     _isConnecting = true;
     _lastError = null;
