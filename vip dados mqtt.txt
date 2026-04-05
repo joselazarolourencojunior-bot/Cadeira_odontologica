@@ -82,3 +82,30 @@ Tópicos (igual no ESP32):
 
 - Comando: CADEIRA-D83BDA4CF344/command
 - Status: CADEIRA-D83BDA4CF344/status
+
+
+
+
+
+
+Credenciais / parâmetros MQTT (deste app)
+
+- Broker: test.mosquitto.org
+- Porta TCP (sem TLS): 1883
+- Usuário/Senha: não usa
+- ClientId: APP-CADEIRA-<SERIAL>-<timestamp> (único)
+- Tópicos que o app recebe (RX):
+  - CADEIRA-<SERIAL>/status
+  - CADEIRA-<SERIAL>/command
+
+
+
+
+
+
+
+
+
+
+
+
