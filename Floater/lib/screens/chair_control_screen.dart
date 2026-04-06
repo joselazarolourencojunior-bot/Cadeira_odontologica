@@ -575,6 +575,9 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     final mqttRetrySuffix = mqttRetryAttempt > 0
         ? ' ($mqttRetryAttempt/$mqttMaxRetryAttempts)'
         : '';
+    final mqttRxCount = mqtt.rxCount;
+    final mqttLastRxAt = mqtt.lastRxAt;
+    final mqttLastRxTopic = mqtt.lastRxTopic;
 
     // Determina o status geral
     String statusText;
@@ -725,6 +728,34 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
                 alignment: Alignment.centerLeft,
                 child: Text(
                   'Tópico: $mqttPrefix',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.black.withValues(alpha: 0.55),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+            if (mqttHasSerial) ...[
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'MQTT RX: $mqttRxCount | Último: ${mqttLastRxAt?.toIso8601String() ?? '-'}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.black.withValues(alpha: 0.55),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+            if (mqttHasSerial && mqttLastRxTopic != null) ...[
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Último tópico: $mqttLastRxTopic',
                   style: TextStyle(
                     fontSize: 11,
                     color: Colors.black.withValues(alpha: 0.55),
@@ -1081,74 +1112,105 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
                 // Visualização da Cadeira com Controles Integrados
                 Center(
                   child: Consumer2<BluetoothService, MqttService>(
-                    builder: (context, bluetoothService, mqttService, child) =>
-                        ChairVisualization(
-                          chairState: bluetoothService.isConnected
-                              ? bluetoothService.chairState
-                              : mqttService.chairState,
-                          onReflectorToggle: () => _executeCommand(
-                            context,
-                            bluetoothService,
-                            () => bluetoothService.toggleReflector(),
-                          ),
-                          onBackUp: () => _executeCommand(
-                            context,
-                            bluetoothService,
-                            () => bluetoothService.moveBackUp(),
-                          ),
-                          onBackDown: () => _executeCommand(
-                            context,
-                            bluetoothService,
-                            () => bluetoothService.moveBackDown(),
-                          ),
-                          onSeatUp: () => _executeCommand(
-                            context,
-                            bluetoothService,
-                            () => bluetoothService.moveSeatUp(),
-                          ),
-                          onSeatDown: () => _executeCommand(
-                            context,
-                            bluetoothService,
-                            () => bluetoothService.moveSeatDown(),
-                          ),
-                          onLegUp: () => _executeCommand(
-                            context,
-                            bluetoothService,
-                            () => bluetoothService.toggleUpperLegs(),
-                          ),
-                          onLegDown: () => _executeCommand(
-                            context,
-                            bluetoothService,
-                            () => bluetoothService.toggleLowerLegs(),
-                          ),
-                          onAutoZero: () => _executeCommand(
-                            context,
-                            bluetoothService,
-                            () => bluetoothService.setGynecologicalPosition(),
-                          ),
-                          onWorkPosition: () => _executeCommand(
-                            context,
-                            bluetoothService,
-                            () => bluetoothService.setBirthPosition(),
-                          ),
-                          onStopBackMovement: () {
-                            bluetoothService.stopBackMovement();
-                          },
-                          onStopSeatMovement: () {
-                            bluetoothService.stopSeatMovement();
-                          },
-                          onStopLegMovement: () {
-                            bluetoothService.stopLegMovement();
-                          },
+                    builder: (context, bluetoothService, mqttService, child) {
+                      final lastRxAt = mqttService.lastRxAt;
+                      final useMqttState =
+                          mqttService.isConnected &&
+                          lastRxAt != null &&
+                          DateTime.now().difference(lastRxAt) <
+                              const Duration(seconds: 5);
+                      final chairState = useMqttState
+                          ? mqttService.chairState
+                          : bluetoothService.chairState;
+
+                      return ChairVisualization(
+                        chairState: chairState,
+                        onReflectorToggle: () => _executeCommand(
+                          context,
+                          bluetoothService,
+                          () => bluetoothService.toggleReflector(),
                         ),
+                        onBackUp: () => _executeCommand(
+                          context,
+                          bluetoothService,
+                          () => bluetoothService.moveBackUp(),
+                        ),
+                        onBackDown: () => _executeCommand(
+                          context,
+                          bluetoothService,
+                          () => bluetoothService.moveBackDown(),
+                        ),
+                        onSeatUp: () => _executeCommand(
+                          context,
+                          bluetoothService,
+                          () => bluetoothService.moveSeatUp(),
+                        ),
+                        onSeatDown: () => _executeCommand(
+                          context,
+                          bluetoothService,
+                          () => bluetoothService.moveSeatDown(),
+                        ),
+                        onLegUp: () => _executeCommand(
+                          context,
+                          bluetoothService,
+                          () => bluetoothService.toggleUpperLegs(),
+                        ),
+                        onLegDown: () => _executeCommand(
+                          context,
+                          bluetoothService,
+                          () => bluetoothService.toggleLowerLegs(),
+                        ),
+                        onAutoZero: () => _executeCommand(
+                          context,
+                          bluetoothService,
+                          () => bluetoothService.setGynecologicalPosition(),
+                        ),
+                        onWorkPosition: () => _executeCommand(
+                          context,
+                          bluetoothService,
+                          () => bluetoothService.setBirthPosition(),
+                        ),
+                        onStopBackMovement: () {
+                          bluetoothService.stopBackMovement();
+                        },
+                        onStopSeatMovement: () {
+                          bluetoothService.stopSeatMovement();
+                        },
+                        onStopLegMovement: () {
+                          bluetoothService.stopLegMovement();
+                        },
+                      );
+                    },
                   ),
                 ),
                 const SizedBox(height: 20),
 
                 // Status dos Encoders e Limites
-                if (bluetoothService.isConnected)
-                  EncoderStatusWidget(chairState: bluetoothService.chairState),
-                if (bluetoothService.isConnected) const SizedBox(height: 16),
+                Builder(
+                  builder: (context) {
+                    final mqttService = context.watch<MqttService>();
+                    final lastRxAt = mqttService.lastRxAt;
+                    final useMqttState =
+                        mqttService.isConnected &&
+                        lastRxAt != null &&
+                        DateTime.now().difference(lastRxAt) <
+                            const Duration(seconds: 5);
+                    final chairState = useMqttState
+                        ? mqttService.chairState
+                        : bluetoothService.chairState;
+
+                    if (!bluetoothService.isConnected && !useMqttState) {
+                      return const SizedBox.shrink();
+                    }
+
+                    return Column(
+                      children: [
+                        EncoderStatusWidget(chairState: chairState),
+                        const SizedBox(height: 16),
+                      ],
+                    );
+                  },
+                ),
 
                 // Botões de controle rápido
                 SingleChildScrollView(

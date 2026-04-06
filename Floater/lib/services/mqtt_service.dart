@@ -13,6 +13,10 @@ class MqttService extends ChangeNotifier {
   ChairState _chairState = ChairState();
   final SettingsService _settingsService;
   String? _lastError;
+  int _rxCount = 0;
+  DateTime? _lastRxAt;
+  String? _lastRxTopic;
+  String? _lastRxPayload;
   late final String _sessionId = DateTime.now().millisecondsSinceEpoch
       .toString();
   late String _lastChairTopicPrefix;
@@ -61,6 +65,10 @@ class MqttService extends ChangeNotifier {
   String get chairTopicPrefix => _chairTopicPrefix;
   int get retryAttempt => _retryAttempt;
   int get maxRetryAttempts => _maxRetryAttempts;
+  int get rxCount => _rxCount;
+  DateTime? get lastRxAt => _lastRxAt;
+  String? get lastRxTopic => _lastRxTopic;
+  String? get lastRxPayload => _lastRxPayload;
 
   @override
   void dispose() {
@@ -141,7 +149,11 @@ class MqttService extends ChangeNotifier {
         _client!.subscribe(_statusTopic, MqttQos.atMostOnce);
 
         // Configurar listener para mensagens recebidas
-        _client!.updates!.listen(_onMessageReceived);
+        final updates = _client!.updates;
+        if (updates == null) {
+          throw Exception('MQTT updates stream indisponível');
+        }
+        updates.listen(_onMessageReceived);
 
         notifyListeners();
       } else {
@@ -435,7 +447,7 @@ class MqttService extends ChangeNotifier {
   }
 
   void _onSubscribed(String topic) {
-    // Lidar com subscrição bem-sucedida se necessário
+    debugPrint('✅ MQTT subscribed: $topic');
   }
 
   void _onMessageReceived(List<MqttReceivedMessage<MqttMessage>> event) {
@@ -445,6 +457,11 @@ class MqttService extends ChangeNotifier {
     );
 
     final topic = event[0].topic;
+    _rxCount += 1;
+    _lastRxAt = DateTime.now();
+    _lastRxTopic = topic;
+    _lastRxPayload = payload.length > 300 ? payload.substring(0, 300) : payload;
+    debugPrint('📥 MQTT RX [$topic]: $payload');
 
     if (topic == _statusTopic) {
       try {
