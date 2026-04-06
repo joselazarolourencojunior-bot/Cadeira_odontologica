@@ -298,8 +298,8 @@ class BluetoothService extends ChangeNotifier {
 
     // Sempre processamos LIMIT e STOP (críticos)
     if (confirmation.contains('LIMIT')) {
-      if (confirmation.startsWith('DE:')) _chairState.backUpLimit = true;
-      if (confirmation.startsWith('SE:')) _chairState.backDownLimit = true;
+      if (confirmation.startsWith('DE:')) _chairState.backDownLimit = true;
+      if (confirmation.startsWith('SE:')) _chairState.backUpLimit = true;
       if (confirmation.startsWith('SA:')) _chairState.seatUpLimit = true;
       if (confirmation.startsWith('DA:')) _chairState.seatDownLimit = true;
       if (confirmation.startsWith('SP:')) _chairState.legUpLimit = true;
@@ -317,8 +317,8 @@ class BluetoothService extends ChangeNotifier {
         confirmation == 'AT_SEG:OK' ||
         confirmation == 'VZ:OFF' ||
         confirmation == 'PT:OFF') {
-      if (confirmation.startsWith('DE:')) _chairState.backUpOn = false;
-      if (confirmation.startsWith('SE:')) _chairState.backDownOn = false;
+      if (confirmation.startsWith('DE:')) _chairState.backDownOn = false;
+      if (confirmation.startsWith('SE:')) _chairState.backUpOn = false;
       if (confirmation.startsWith('SA:')) _chairState.seatUpOn = false;
       if (confirmation.startsWith('DA:')) _chairState.seatDownOn = false;
       if (confirmation.startsWith('SP:')) _chairState.upperLegsOn = false;
@@ -346,14 +346,14 @@ class BluetoothService extends ChangeNotifier {
       if (confirmation.startsWith('DE:')) {
         if (_lastBackStop == null ||
             now.difference(_lastBackStop!) > ignoreWindow) {
-          _chairState.backUpOn = true;
-          _chairState.backDownOn = false;
+          _chairState.backDownOn = true;
+          _chairState.backUpOn = false;
         }
       } else if (confirmation.startsWith('SE:')) {
         if (_lastBackStop == null ||
             now.difference(_lastBackStop!) > ignoreWindow) {
-          _chairState.backDownOn = true;
-          _chairState.backUpOn = false;
+          _chairState.backUpOn = true;
+          _chairState.backDownOn = false;
         }
       } else if (confirmation.startsWith('SA:')) {
         if (_lastSeatStop == null ||

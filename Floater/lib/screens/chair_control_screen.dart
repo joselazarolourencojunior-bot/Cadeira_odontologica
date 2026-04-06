@@ -567,6 +567,11 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     final mqttIsConnecting = mqtt.isConnecting;
     final mqttError = mqtt.lastError;
     final mqttHasSerial = mqtt.hasValidSerial;
+    final mqttRetryAttempt = mqtt.retryAttempt;
+    final mqttMaxRetryAttempts = mqtt.maxRetryAttempts;
+    final mqttRetrySuffix = mqttRetryAttempt > 0
+        ? ' ($mqttRetryAttempt/$mqttMaxRetryAttempts)'
+        : '';
 
     // Determina o status geral
     String statusText;
@@ -677,10 +682,10 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
                     label: 'MQTT (RX)',
                     value: mqttHasSerial
                         ? (mqttIsConnected
-                              ? 'Conectado'
+                              ? 'Conectado$mqttRetrySuffix'
                               : (mqttIsConnecting
-                                    ? 'Conectando'
-                                    : 'Desconectado'))
+                                    ? 'Conectando$mqttRetrySuffix'
+                                    : 'Desconectado$mqttRetrySuffix'))
                         : 'Sem SERIAL',
                     color: mqttHasSerial
                         ? (mqttIsConnected

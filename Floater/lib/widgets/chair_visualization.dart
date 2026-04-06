@@ -176,7 +176,7 @@ class _ChairVisualizationState extends State<ChairVisualization> {
         ),
 
         // ========== ENCOSTO - DIVIDIDO EM DUAS ÁREAS ==========
-        // Área FRONTAL do encosto: SENTAR (DE) - Azul
+        // Área FRONTAL do encosto: SENTAR (SE) - Azul
         Positioned(
           top: 50,
           left: 150,
@@ -204,7 +204,7 @@ class _ChairVisualizationState extends State<ChairVisualization> {
           ),
         ),
 
-        // Área TRASEIRA do encosto: DEITAR (SE) - Laranja (na traseira)
+        // Área TRASEIRA do encosto: DEITAR (DE) - Laranja (na traseira)
         Positioned(
           top: 50,
           left: 10,
@@ -654,10 +654,10 @@ class _ChairVisualizationState extends State<ChairVisualization> {
 
   Color _getBackIndicatorColor() {
     if (widget.chairState.backUpOn == true) {
-      return Colors.orange.shade600; // SENTAR
+      return Colors.blue.shade600; // SENTAR (DE)
     }
     if (widget.chairState.backDownOn == true) {
-      return Colors.blue.shade600; // DEITAR
+      return Colors.orange.shade600; // DEITAR (SE)
     }
     return _accentColor;
   }
@@ -1369,29 +1369,64 @@ class _TouchAreaButtonState extends State<_TouchAreaButton> {
   @override
   Widget build(BuildContext context) {
     final isActive = widget.isActive;
-    debugPrint('🎨 Renderizando ${widget.label}: isActive=$isActive');
-
     return GestureDetector(
       onTap: () {
-        debugPrint('👆 Tap em ${widget.label}');
         widget.onTap?.call();
       },
       onLongPressStart: (_) {
-        debugPrint('🔘 LongPressStart em ${widget.label}');
         widget.onLongPressStart?.call();
       },
       onLongPressEnd: (_) {
-        debugPrint('🔘 LongPressEnd em ${widget.label}');
         widget.onLongPressEnd?.call();
       },
       onLongPressCancel: () {
-        debugPrint('🔘 LongPressCancel em ${widget.label}');
         widget.onLongPressEnd?.call();
       },
-      child: Container(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
         width: widget.width,
         height: widget.height,
-        color: Colors.transparent, // Área de toque invisível
+        decoration: BoxDecoration(
+          color: (isActive ? widget.activeColor : widget.inactiveColor)
+              .withValues(alpha: isActive ? 0.28 : 0.22),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: (isActive ? widget.activeColor : widget.inactiveColor)
+                .withValues(alpha: isActive ? 0.95 : 0.55),
+            width: isActive ? 2 : 1,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: isActive ? 0.18 : 0.10),
+              blurRadius: isActive ? 16 : 10,
+              offset: const Offset(0, 6),
+            ),
+          ],
+        ),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                widget.icon,
+                size: 18,
+                color: (isActive ? widget.activeColor : widget.inactiveColor)
+                    .withValues(alpha: 0.95),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                widget.label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: widget.fontSize,
+                  fontWeight: FontWeight.w800,
+                  color: (isActive ? widget.activeColor : widget.inactiveColor)
+                      .withValues(alpha: 0.98),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

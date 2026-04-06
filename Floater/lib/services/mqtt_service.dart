@@ -17,6 +17,9 @@ class MqttService extends ChangeNotifier {
       .toString();
   late String _lastChairTopicPrefix;
   final Map<String, Timer> _rxWatchdogs = {};
+  Timer? _retryTimer;
+  int _retryAttempt = 0;
+  static const int _maxRetryAttempts = 6;
 
   MqttService({required SettingsService settingsService})
     : _settingsService = settingsService {
@@ -49,10 +52,13 @@ class MqttService extends ChangeNotifier {
   String? get lastError => _lastError;
   bool get hasValidSerial =>
       (_settingsService.bluetoothSerial?.trim().isNotEmpty ?? false);
+  int get retryAttempt => _retryAttempt;
+  int get maxRetryAttempts => _maxRetryAttempts;
 
   @override
   void dispose() {
     _settingsService.removeListener(_onSettingsChanged);
+    _retryTimer?.cancel();
     super.dispose();
   }
 
@@ -64,12 +70,16 @@ class MqttService extends ChangeNotifier {
       disconnect();
     }
     if (!hasValidSerial) {
+      _retryTimer?.cancel();
+      _retryAttempt = 0;
       _lastError = 'Aguardando Bluetooth para obter SERIAL e habilitar MQTT';
       _isConnected = false;
       _isConnecting = false;
       notifyListeners();
       return;
     }
+    _retryTimer?.cancel();
+    _retryAttempt = 0;
     Future.microtask(() {
       connect();
     });
@@ -79,6 +89,8 @@ class MqttService extends ChangeNotifier {
   Future<void> connect() async {
     if (_isConnected || _isConnecting) return;
     if (!hasValidSerial) {
+      _retryTimer?.cancel();
+      _retryAttempt = 0;
       _lastError = 'Aguardando Bluetooth para obter SERIAL e habilitar MQTT';
       _isConnected = false;
       _isConnecting = false;
@@ -113,6 +125,8 @@ class MqttService extends ChangeNotifier {
       if (_client!.connectionStatus!.state == MqttConnectionState.connected) {
         _isConnected = true;
         _isConnecting = false;
+        _retryTimer?.cancel();
+        _retryAttempt = 0;
 
         // Subscrever aos tópicos
         _client!.subscribe(_commandTopic, MqttQos.atMostOnce);
@@ -130,8 +144,22 @@ class MqttService extends ChangeNotifier {
       debugPrint('❌ MQTT connect error: $e');
       _isConnecting = false;
       _isConnected = false;
+      _scheduleReconnect();
       notifyListeners();
     }
+  }
+
+  void _scheduleReconnect() {
+    if (!hasValidSerial) return;
+    if (_retryAttempt >= _maxRetryAttempts) return;
+    if (_retryTimer?.isActive ?? false) return;
+
+    _retryAttempt += 1;
+    final seconds = (_retryAttempt * _retryAttempt).clamp(1, 30);
+    _retryTimer = Timer(Duration(seconds: seconds), () {
+      if (!hasValidSerial) return;
+      connect();
+    });
   }
 
   /// Desconecta do broker MQTT
@@ -141,6 +169,8 @@ class MqttService extends ChangeNotifier {
     }
     _isConnected = false;
     _isConnecting = false;
+    _retryTimer?.cancel();
+    _retryAttempt = 0;
     for (final timer in _rxWatchdogs.values) {
       timer.cancel();
     }
@@ -187,16 +217,16 @@ class MqttService extends ChangeNotifier {
         _chairState.seatDownOn = false;
       });
     } else if (confirmation == 'DE:ON') {
-      _chairState.backUpOn = true;
-      _chairState.backDownOn = false;
+      _chairState.backDownOn = true;
+      _chairState.backUpOn = false;
       _chairState.shouldStopAllTimers = false;
       _armWatchdog('back', () {
         _chairState.backUpOn = false;
         _chairState.backDownOn = false;
       });
     } else if (confirmation == 'SE:ON') {
-      _chairState.backDownOn = true;
-      _chairState.backUpOn = false;
+      _chairState.backUpOn = true;
+      _chairState.backDownOn = false;
       _chairState.shouldStopAllTimers = false;
       _armWatchdog('back', () {
         _chairState.backUpOn = false;

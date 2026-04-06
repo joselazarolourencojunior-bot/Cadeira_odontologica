@@ -131,8 +131,8 @@ class ChairState {
 
 class ChairCommand {
   // Comandos de movimento
-  static const String backUp = 'DE'; // Sentar
-  static const String backDown = 'SE'; // Deitar
+  static const String backUp = 'SE'; // Sentar (encosto sobe)
+  static const String backDown = 'DE'; // Deitar (encosto desce)
   static const String seatUp = 'SA'; // Assento sobe
   static const String seatDown = 'DA'; // Assento desce
   static const String upperLegs = 'SP'; // Pernas sobem
