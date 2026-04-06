@@ -32,8 +32,14 @@ class MqttService extends ChangeNotifier {
   static const int _port = 1883;
 
   // Tópicos MQTT - usando serial da cadeira
+  String _effectiveSerial() {
+    final manual = _settingsService.settings.chairSerial.trim();
+    if (manual.isNotEmpty) return manual;
+    return _settingsService.bluetoothSerial?.trim() ?? '';
+  }
+
   String get _chairTopicPrefix {
-    final serial = _settingsService.bluetoothSerial?.trim() ?? '';
+    final serial = _effectiveSerial();
     if (serial.isEmpty) return 'CADEIRA-DESCONHECIDA';
 
     final normalized = serial.toUpperCase();
@@ -44,14 +50,15 @@ class MqttService extends ChangeNotifier {
 
   String get _clientId => 'APP-$_chairTopicPrefix-$_sessionId';
   String get _commandTopic => '$_chairTopicPrefix/command';
+  String get _txCmdTopic => '$_chairTopicPrefix/tx_cmd';
   String get _statusTopic => '$_chairTopicPrefix/status';
 
   bool get isConnected => _isConnected;
   bool get isConnecting => _isConnecting;
   ChairState get chairState => _chairState;
   String? get lastError => _lastError;
-  bool get hasValidSerial =>
-      (_settingsService.bluetoothSerial?.trim().isNotEmpty ?? false);
+  bool get hasValidSerial => _effectiveSerial().isNotEmpty;
+  String get chairTopicPrefix => _chairTopicPrefix;
   int get retryAttempt => _retryAttempt;
   int get maxRetryAttempts => _maxRetryAttempts;
 
@@ -72,7 +79,7 @@ class MqttService extends ChangeNotifier {
     if (!hasValidSerial) {
       _retryTimer?.cancel();
       _retryAttempt = 0;
-      _lastError = 'Aguardando Bluetooth para obter SERIAL e habilitar MQTT';
+      _lastError = 'Defina o SERIAL (Configurações) ou conecte Bluetooth';
       _isConnected = false;
       _isConnecting = false;
       notifyListeners();
@@ -91,7 +98,7 @@ class MqttService extends ChangeNotifier {
     if (!hasValidSerial) {
       _retryTimer?.cancel();
       _retryAttempt = 0;
-      _lastError = 'Aguardando Bluetooth para obter SERIAL e habilitar MQTT';
+      _lastError = 'Defina o SERIAL (Configurações) ou conecte Bluetooth';
       _isConnected = false;
       _isConnecting = false;
       notifyListeners();
@@ -130,6 +137,7 @@ class MqttService extends ChangeNotifier {
 
         // Subscrever aos tópicos
         _client!.subscribe(_commandTopic, MqttQos.atMostOnce);
+        _client!.subscribe(_txCmdTopic, MqttQos.atMostOnce);
         _client!.subscribe(_statusTopic, MqttQos.atMostOnce);
 
         // Configurar listener para mensagens recebidas
@@ -451,7 +459,7 @@ class MqttService extends ChangeNotifier {
       return;
     }
 
-    if (topic == _commandTopic) {
+    if (topic == _commandTopic || topic == _txCmdTopic) {
       updateChairState(payload);
       return;
     }

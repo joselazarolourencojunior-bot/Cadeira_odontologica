@@ -238,17 +238,19 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
       return 'CADEIRA-$up';
     }
 
-    final serialToUse = chairId != null && chairId.trim().isNotEmpty
-        ? chairId.trim().toUpperCase()
-        : normalizedSerial(settingsSerial);
+    final serialToUse = settingsSerial.isNotEmpty
+        ? normalizedSerial(settingsSerial)
+        : (chairId != null && chairId.trim().isNotEmpty
+              ? chairId.trim().toUpperCase()
+              : 'CADEIRA-DESCONHECIDA');
 
     supabase.setChairSerialNumber(serialToUse);
 
-    if (chairId != null && chairId.trim().isNotEmpty) {
-      if (settingsSerial.toUpperCase() != chairId.trim().toUpperCase()) {
-        await settingsService.setChairSerial(chairId.trim().toUpperCase());
-      }
-      debugPrint('📋 Cadeira registrada: $serialToUse');
+    if (settingsSerial.isEmpty &&
+        chairId != null &&
+        chairId.trim().isNotEmpty) {
+      await settingsService.setChairSerial(chairId.trim().toUpperCase());
+      debugPrint('📋 Cadeira registrada (BLE): $serialToUse');
     } else {
       debugPrint('📋 Cadeira registrada (config): $serialToUse');
     }
@@ -567,6 +569,7 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     final mqttIsConnecting = mqtt.isConnecting;
     final mqttError = mqtt.lastError;
     final mqttHasSerial = mqtt.hasValidSerial;
+    final mqttPrefix = mqtt.chairTopicPrefix;
     final mqttRetryAttempt = mqtt.retryAttempt;
     final mqttMaxRetryAttempts = mqtt.maxRetryAttempts;
     final mqttRetrySuffix = mqttRetryAttempt > 0
@@ -711,6 +714,20 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
                   style: TextStyle(
                     fontSize: 11,
                     color: Colors.red.shade700,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+            if (mqttHasSerial) ...[
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Tópico: $mqttPrefix',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.black.withValues(alpha: 0.55),
                     fontWeight: FontWeight.w600,
                   ),
                 ),

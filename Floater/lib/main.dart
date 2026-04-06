@@ -8,6 +8,7 @@ import 'services/mqtt_service.dart';
 import 'screens/bluetooth_connection_screen_ble.dart';
 import 'screens/chair_control_screen.dart';
 import 'screens/settings_screen.dart';
+// import 'screens/manufacturer_settings_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -52,6 +53,7 @@ class CadeiraOdontologicaApp extends StatelessWidget {
           '/home': (context) => const ChairControlScreen(),
           '/bluetooth': (context) => const BluetoothConnectionScreen(),
           '/settings': (context) => const SettingsScreen(),
+          // '/manufacturer': (context) => const ManufacturerSettingsScreen(),
         },
         debugShowCheckedModeBanner: false,
       ),

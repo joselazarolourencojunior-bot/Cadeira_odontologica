@@ -12,141 +12,21 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  final _passwordController = TextEditingController();
   final _newPasswordController = TextEditingController();
   final _maintenanceIntervalController = TextEditingController();
-  bool _isAuthenticated = false;
-  bool _obscurePassword = true;
 
   @override
   void dispose() {
-    _passwordController.dispose();
     _newPasswordController.dispose();
     _maintenanceIntervalController.dispose();
     super.dispose();
   }
 
-  void _authenticate() {
-    final settingsService = context.read<SettingsService>();
-    if (settingsService.verifyPassword(_passwordController.text)) {
-      setState(() {
-        _isAuthenticated = true;
-        _passwordController.clear();
-      });
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Senha incorreta!'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    }
-  }
-
-  void _logout() {
-    setState(() {
-      _isAuthenticated = false;
-      _passwordController.clear();
-    });
-  }
+  void _logout() {}
 
   @override
   Widget build(BuildContext context) {
-    if (!_isAuthenticated) {
-      return _buildLoginScreen();
-    }
     return _buildSettingsScreen();
-  }
-
-  Widget _buildLoginScreen() {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Configurações'),
-        backgroundColor: Colors.blue.shade700,
-        foregroundColor: Colors.white,
-      ),
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24.0),
-          child: Card(
-            elevation: 8,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(32.0),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.lock_outline,
-                    size: 80,
-                    color: Colors.blue.shade700,
-                  ),
-                  const SizedBox(height: 24),
-                  const Text(
-                    'Acesso Restrito',
-                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Digite a senha de administrador',
-                    style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
-                  ),
-                  const SizedBox(height: 32),
-                  TextField(
-                    controller: _passwordController,
-                    obscureText: _obscurePassword,
-                    decoration: InputDecoration(
-                      labelText: 'Senha',
-                      prefixIcon: const Icon(Icons.vpn_key),
-                      suffixIcon: IconButton(
-                        icon: Icon(
-                          _obscurePassword
-                              ? Icons.visibility
-                              : Icons.visibility_off,
-                        ),
-                        onPressed: () {
-                          setState(() {
-                            _obscurePassword = !_obscurePassword;
-                          });
-                        },
-                      ),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    onSubmitted: (_) => _authenticate(),
-                  ),
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 50,
-                    child: ElevatedButton(
-                      onPressed: _authenticate,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue.shade700,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      child: const Text(
-                        'ENTRAR',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
   }
 
   Widget _buildSettingsScreen() {
