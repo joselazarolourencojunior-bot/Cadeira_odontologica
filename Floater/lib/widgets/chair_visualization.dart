@@ -375,11 +375,11 @@ class _ChairVisualizationState extends State<ChairVisualization> {
     final seatTop = seatPivotY;
 
     final cabinetLeft = seatLeft;
-    final cabinetTop = seatTop + seatThickness + 10;
+    final cabinetTop = seatTop + seatThickness;
     final cabinetWidth = seatWidth;
     const cabinetHeight = 34.0;
     const inset = 6.0;
-    final drawerWidth = seatWidth * 0.62;
+    final drawerWidth = seatWidth * 0.82;
     final drawerHeight = cabinetHeight - (inset * 2);
     final openDx = (cabinetWidth - drawerWidth - (inset * 2)).clamp(0, 9999);
 
