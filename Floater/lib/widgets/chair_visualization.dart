@@ -382,7 +382,7 @@ class _ChairVisualizationState extends State<ChairVisualization> {
     const inset = 6.0;
     final drawerWidth = seatWidth * 0.82;
     final drawerHeight = cabinetHeight - (inset * 2);
-    final openLeft = cabinetWidth + inset;
+    final openLeft = cabinetWidth - (drawerWidth * 0.25) - inset;
 
     return Center(
       child: IgnorePointer(
@@ -415,6 +415,7 @@ class _ChairVisualizationState extends State<ChairVisualization> {
                   width: cabinetWidth,
                   height: cabinetHeight,
                   child: Stack(
+                    clipBehavior: Clip.none,
                     children: [
                       AnimatedPositioned(
                         duration: const Duration(milliseconds: 180),
