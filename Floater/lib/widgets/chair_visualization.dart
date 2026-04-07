@@ -1368,7 +1368,6 @@ class _TouchAreaButton extends StatefulWidget {
 class _TouchAreaButtonState extends State<_TouchAreaButton> {
   @override
   Widget build(BuildContext context) {
-    final isActive = widget.isActive;
     return GestureDetector(
       onTap: () {
         widget.onTap?.call();
@@ -1382,51 +1381,10 @@ class _TouchAreaButtonState extends State<_TouchAreaButton> {
       onLongPressCancel: () {
         widget.onLongPressEnd?.call();
       },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
+      child: SizedBox(
         width: widget.width,
         height: widget.height,
-        decoration: BoxDecoration(
-          color: (isActive ? widget.activeColor : widget.inactiveColor)
-              .withValues(alpha: isActive ? 0.28 : 0.22),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: (isActive ? widget.activeColor : widget.inactiveColor)
-                .withValues(alpha: isActive ? 0.95 : 0.55),
-            width: isActive ? 2 : 1,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: isActive ? 0.18 : 0.10),
-              blurRadius: isActive ? 16 : 10,
-              offset: const Offset(0, 6),
-            ),
-          ],
-        ),
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                widget.icon,
-                size: 18,
-                color: (isActive ? widget.activeColor : widget.inactiveColor)
-                    .withValues(alpha: 0.95),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                widget.label,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: widget.fontSize,
-                  fontWeight: FontWeight.w800,
-                  color: (isActive ? widget.activeColor : widget.inactiveColor)
-                      .withValues(alpha: 0.98),
-                ),
-              ),
-            ],
-          ),
-        ),
+        child: const SizedBox.shrink(),
       ),
     );
   }

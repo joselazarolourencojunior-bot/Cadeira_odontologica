@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import '../services/settings_service.dart';
 import 'package:intl/intl.dart';
+import 'qr_scan_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -111,6 +113,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             backgroundColor: Colors.orange.shade700,
                             foregroundColor: Colors.white,
                           ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                Card(
+                  elevation: 4,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.settings_input_antenna,
+                              color: Colors.teal.shade700,
+                              size: 28,
+                            ),
+                            const SizedBox(width: 12),
+                            const Text(
+                              'Conexão',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const Divider(height: 24),
+                        ListTile(
+                          title: const Text('SERIAL da Cadeira'),
+                          subtitle: Text(
+                            settings.chairSerial.trim().isEmpty
+                                ? 'Não configurado'
+                                : settings.chairSerial.trim(),
+                          ),
+                          trailing: const Icon(Icons.qr_code_scanner),
+                          onTap: () => _showSerialQrDialog(context),
                         ),
                       ],
                     ),
@@ -286,6 +329,140 @@ class _SettingsScreenState extends State<SettingsScreen> {
           );
         },
       ),
+    );
+  }
+
+  Future<void> _showSerialQrDialog(BuildContext context) async {
+    final settingsService = context.read<SettingsService>();
+    final controller = TextEditingController(
+      text: settingsService.settings.chairSerial.trim(),
+    );
+
+    String normalizeSerial(String raw) {
+      final v = raw.trim();
+      if (v.isEmpty) return '';
+      final up = v.toUpperCase();
+      if (up.startsWith('CADEIRA-')) return up;
+      return 'CADEIRA-$up';
+    }
+
+    String extractSerial(String raw) {
+      final text = raw.trim();
+      if (text.isEmpty) return '';
+      final upper = text.toUpperCase();
+
+      final match = RegExp(r'CADEIRA-[A-Z0-9]+').firstMatch(upper);
+      if (match != null) return match.group(0) ?? '';
+
+      if (RegExp(r'^[A-F0-9]{12}$').hasMatch(upper)) return 'CADEIRA-$upper';
+
+      return normalizeSerial(text);
+    }
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) {
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            top: 16,
+            bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'SERIAL via QR Code',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                decoration: const InputDecoration(
+                  labelText: 'SERIAL (ex: D83BDA4CF344)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () async {
+                        final scanned = await Navigator.of(context).push(
+                          MaterialPageRoute<String>(
+                            builder: (_) => const QrScanScreen(
+                              title: 'Ler QR Code do SERIAL',
+                            ),
+                          ),
+                        );
+                        if (scanned == null) return;
+                        controller.text = extractSerial(scanned);
+                      },
+                      icon: const Icon(Icons.qr_code_scanner),
+                      label: const Text('Ler QR'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        final value = extractSerial(controller.text);
+                        if (value.isEmpty) return;
+                        showDialog(
+                          context: context,
+                          builder: (context) => AlertDialog(
+                            title: const Text('QR Code do SERIAL'),
+                            content: SizedBox(
+                              width: 260,
+                              height: 260,
+                              child: QrImageView(
+                                data: value,
+                                backgroundColor: Colors.white,
+                              ),
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(context),
+                                child: const Text('FECHAR'),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.qr_code),
+                      label: const Text('Mostrar QR'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              ElevatedButton(
+                onPressed: () async {
+                  final value = extractSerial(controller.text);
+                  if (value.isEmpty) {
+                    Navigator.pop(context);
+                    return;
+                  }
+                  await settingsService.setChairSerial(value);
+                  if (!context.mounted) return;
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('SERIAL atualizado'),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                },
+                child: const Text('SALVAR'),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 

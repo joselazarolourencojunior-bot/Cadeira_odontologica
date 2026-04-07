@@ -2,6 +2,7 @@
     <!-- Permissões de rede (necessárias para MQTT e Supabase) -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
 
     <!-- Permissões para Bluetooth -->
     <uses-permission android:name="android.permission.BLUETOOTH" />

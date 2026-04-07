@@ -57,6 +57,9 @@ dependencies:
   
   # MQTT for remote cloud communication
   mqtt_client: ^9.8.1
+  
+  mobile_scanner: ^6.0.2
+  qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:
