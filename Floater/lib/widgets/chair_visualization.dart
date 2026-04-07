@@ -362,24 +362,43 @@ class _ChairVisualizationState extends State<ChairVisualization> {
         ? Colors.orange.shade600.withValues(alpha: 0.55)
         : Colors.blueGrey.shade600.withValues(alpha: 0.35);
 
-    return Positioned(
-      top: 290,
-      left: 175,
+    const paintSize = Size(340, 420);
+    final centerX = paintSize.width / 2;
+    final baseY = paintSize.height - 60;
+    final seatHeight = _getSeatHeight();
+    final heightOffset = (60 - seatHeight) * 0.8;
+    final seatPivotX = centerX - 20;
+    final seatPivotY = baseY - 140 + heightOffset;
+    const seatWidth = 130.0;
+    const seatThickness = 25.0;
+    final seatLeft = seatPivotX - 30;
+    final seatTop = seatPivotY;
+
+    final cabinetLeft = seatLeft;
+    final cabinetTop = seatTop + seatThickness + 10;
+    final cabinetWidth = seatWidth;
+    const cabinetHeight = 34.0;
+    const inset = 6.0;
+    final drawerWidth = seatWidth * 0.62;
+    final drawerHeight = cabinetHeight - (inset * 2);
+    final openDx = (cabinetWidth - drawerWidth - (inset * 2)).clamp(0, 9999);
+
+    return Center(
       child: IgnorePointer(
         child: SizedBox(
-          width: 120,
-          height: 34,
+          width: paintSize.width,
+          height: paintSize.height,
           child: Stack(
             children: [
               Positioned(
-                left: 0,
-                top: 0,
+                left: cabinetLeft,
+                top: cabinetTop,
                 child: Container(
-                  width: 64,
-                  height: 30,
+                  width: cabinetWidth,
+                  height: cabinetHeight,
                   decoration: BoxDecoration(
                     color: baseColor,
-                    borderRadius: BorderRadius.circular(6),
+                    borderRadius: BorderRadius.circular(8),
                     border: Border.all(
                       color: Colors.blueGrey.shade700.withValues(alpha: 0.55),
                       width: 1,
@@ -388,33 +407,42 @@ class _ChairVisualizationState extends State<ChairVisualization> {
                 ),
               ),
               Positioned(
-                left: 4,
-                top: 4,
-                child: AnimatedSlide(
-                  duration: const Duration(milliseconds: 180),
-                  curve: Curves.easeOut,
-                  offset: gavetaOpen ? const Offset(0.75, 0) : Offset.zero,
-                  child: Container(
-                    width: 56,
-                    height: 22,
-                    decoration: BoxDecoration(
-                      color: drawerColor,
-                      borderRadius: BorderRadius.circular(5),
-                      border: Border.all(
-                        color: Colors.black.withValues(alpha: 0.25),
-                        width: 1,
-                      ),
-                    ),
-                    child: Center(
-                      child: Container(
-                        width: 18,
-                        height: 3,
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.35),
-                          borderRadius: BorderRadius.circular(99),
+                left: cabinetLeft,
+                top: cabinetTop,
+                child: SizedBox(
+                  width: cabinetWidth,
+                  height: cabinetHeight,
+                  child: Stack(
+                    children: [
+                      AnimatedPositioned(
+                        duration: const Duration(milliseconds: 180),
+                        curve: Curves.easeOut,
+                        left: inset + (gavetaOpen ? openDx : 0),
+                        top: inset,
+                        child: Container(
+                          width: drawerWidth,
+                          height: drawerHeight,
+                          decoration: BoxDecoration(
+                            color: drawerColor,
+                            borderRadius: BorderRadius.circular(7),
+                            border: Border.all(
+                              color: Colors.black.withValues(alpha: 0.25),
+                              width: 1,
+                            ),
+                          ),
+                          child: Center(
+                            child: Container(
+                              width: 22,
+                              height: 3,
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.35),
+                                borderRadius: BorderRadius.circular(99),
+                              ),
+                            ),
+                          ),
                         ),
                       ),
-                    ),
+                    ],
                   ),
                 ),
               ),
