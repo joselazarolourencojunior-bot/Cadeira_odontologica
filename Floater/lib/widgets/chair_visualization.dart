@@ -151,6 +151,7 @@ class _ChairVisualizationState extends State<ChairVisualization> {
 
   Widget _buildFirstPage() {
     return Stack(
+      clipBehavior: Clip.none,
       children: [
         // Desenho técnico da cadeira - Vista Lateral
         Center(
@@ -381,7 +382,7 @@ class _ChairVisualizationState extends State<ChairVisualization> {
     const inset = 6.0;
     final drawerWidth = seatWidth * 0.82;
     final drawerHeight = cabinetHeight - (inset * 2);
-    final openDx = (cabinetWidth - drawerWidth - (inset * 2)).clamp(0, 9999);
+    final openLeft = cabinetWidth + inset;
 
     return Center(
       child: IgnorePointer(
@@ -389,6 +390,7 @@ class _ChairVisualizationState extends State<ChairVisualization> {
           width: paintSize.width,
           height: paintSize.height,
           child: Stack(
+            clipBehavior: Clip.none,
             children: [
               Positioned(
                 left: cabinetLeft,
@@ -417,7 +419,7 @@ class _ChairVisualizationState extends State<ChairVisualization> {
                       AnimatedPositioned(
                         duration: const Duration(milliseconds: 180),
                         curve: Curves.easeOut,
-                        left: inset + (gavetaOpen ? openDx : 0),
+                        left: gavetaOpen ? openLeft : inset,
                         top: inset,
                         child: Container(
                           width: drawerWidth,
@@ -771,6 +773,9 @@ class _ChairVisualizationState extends State<ChairVisualization> {
   }
 
   double _getLegRestAngle() {
+    if (widget.chairState.gavetaOpen == true) {
+      return 0;
+    }
     if (widget.chairState.upperLegsOn == true) {
       return 30; // Subindo em direção à horizontal
     } else if (widget.chairState.lowerLegsOn == true) {
