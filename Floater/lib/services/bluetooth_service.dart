@@ -296,6 +296,30 @@ class BluetoothService extends ChangeNotifier {
       milliseconds: 2500,
     ); // Janela aumentada para 2.5 segundos
 
+    if (confirmation.startsWith('GAVETA:OPEN')) {
+      _chairState.gavetaOpen = true;
+      _chairState.upperLegsOn = false;
+      _chairState.lowerLegsOn = false;
+      _chairState.shouldStopAllTimers = true;
+      notifyListeners();
+      return;
+    }
+
+    if (confirmation.startsWith('GAVETA:CLOSED')) {
+      _chairState.gavetaOpen = false;
+      notifyListeners();
+      return;
+    }
+
+    if (confirmation == 'SP:GAVETA' || confirmation == 'DP:GAVETA') {
+      _chairState.gavetaOpen = true;
+      _chairState.upperLegsOn = false;
+      _chairState.lowerLegsOn = false;
+      _chairState.shouldStopAllTimers = true;
+      notifyListeners();
+      return;
+    }
+
     // Sempre processamos LIMIT e STOP (críticos)
     if (confirmation.contains('LIMIT')) {
       if (confirmation.startsWith('DE:')) _chairState.backDownLimit = true;

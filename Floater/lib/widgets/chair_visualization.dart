@@ -174,6 +174,7 @@ class _ChairVisualizationState extends State<ChairVisualization> {
             ),
           ),
         ),
+        _buildDrawerOverlay(),
 
         // ========== ENCOSTO - DIVIDIDO EM DUAS ÁREAS ==========
         // Área FRONTAL do encosto: SENTAR (SE) - Azul
@@ -348,6 +349,79 @@ class _ChairVisualizationState extends State<ChairVisualization> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildDrawerOverlay() {
+    final gavetaOpen = widget.chairState.gavetaOpen;
+    final gavetaIgnored = widget.chairState.gavetaLockIgnored;
+    final baseColor = gavetaIgnored
+        ? Colors.orange.shade700.withValues(alpha: 0.35)
+        : Colors.blueGrey.shade700.withValues(alpha: 0.25);
+    final drawerColor = gavetaOpen
+        ? Colors.orange.shade600.withValues(alpha: 0.55)
+        : Colors.blueGrey.shade600.withValues(alpha: 0.35);
+
+    return Positioned(
+      top: 290,
+      left: 175,
+      child: IgnorePointer(
+        child: SizedBox(
+          width: 120,
+          height: 34,
+          child: Stack(
+            children: [
+              Positioned(
+                left: 0,
+                top: 0,
+                child: Container(
+                  width: 64,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: baseColor,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: Colors.blueGrey.shade700.withValues(alpha: 0.55),
+                      width: 1,
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 4,
+                top: 4,
+                child: AnimatedSlide(
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOut,
+                  offset: gavetaOpen ? const Offset(0.75, 0) : Offset.zero,
+                  child: Container(
+                    width: 56,
+                    height: 22,
+                    decoration: BoxDecoration(
+                      color: drawerColor,
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(
+                        color: Colors.black.withValues(alpha: 0.25),
+                        width: 1,
+                      ),
+                    ),
+                    child: Center(
+                      child: Container(
+                        width: 18,
+                        height: 3,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.35),
+                          borderRadius: BorderRadius.circular(99),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -589,15 +663,13 @@ class _ChairVisualizationState extends State<ChairVisualization> {
   }
 
   void _startTimer(String label, VoidCallback action) {
-    debugPrint('🟢 Iniciando timer para $label');
     _timers[label]?.cancel();
     _activeVisuals[label] = true;
     setState(() {});
     action(); // Execute immediately
-    _timers[label] = Timer.periodic(const Duration(milliseconds: 200), (_) {
+    _timers[label] = Timer.periodic(const Duration(milliseconds: 500), (_) {
       final shouldStop = widget.chairState.shouldStopAllTimers;
       if (shouldStop) {
-        debugPrint('🛑 UI Timer: Parando por limite atingido');
         _stopTimer(label);
         return;
       }
@@ -610,7 +682,6 @@ class _ChairVisualizationState extends State<ChairVisualization> {
     VoidCallback action,
     VoidCallback? stopAction,
   ) {
-    debugPrint('⚡ Pulso de comando para $label');
     _timers[label]?.cancel();
     _timers[label] = null;
     _activeVisuals[label] = true;
@@ -624,7 +695,6 @@ class _ChairVisualizationState extends State<ChairVisualization> {
   }
 
   void _stopTimer(String label, [VoidCallback? stopAction]) {
-    debugPrint('🔴 Parando timer para $label');
     _timers[label]?.cancel();
     _timers[label] = null;
     _activeVisuals[label] = false;
@@ -1381,10 +1451,10 @@ class _TouchAreaButtonState extends State<_TouchAreaButton> {
       onLongPressCancel: () {
         widget.onLongPressEnd?.call();
       },
-      child: SizedBox(
+      child: Container(
         width: widget.width,
         height: widget.height,
-        child: const SizedBox.shrink(),
+        color: Colors.transparent,
       ),
     );
   }

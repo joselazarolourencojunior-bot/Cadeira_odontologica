@@ -28,6 +28,37 @@ class EncoderStatusWidget extends StatelessWidget {
                 ),
               ],
             ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(
+                  chairState.gavetaOpen
+                      ? Icons.inventory_2
+                      : Icons.inventory_2_outlined,
+                  size: 18,
+                  color: chairState.gavetaOpen ? Colors.red : Colors.green,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  chairState.gavetaOpen ? 'Gaveta aberta' : 'Gaveta fechada',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: chairState.gavetaOpen ? Colors.red : Colors.green,
+                  ),
+                ),
+                const Spacer(),
+                if (chairState.gavetaLockIgnored)
+                  Text(
+                    'IGNORADA',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.orange.shade700,
+                    ),
+                  ),
+              ],
+            ),
             const SizedBox(height: 16),
 
             // Indicadores de posição

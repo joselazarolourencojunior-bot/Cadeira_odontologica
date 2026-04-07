@@ -38,6 +38,8 @@ class ChairState {
   // Estado das automações
   bool isMovingToGineco; // Volta a Zero (VZ)
   bool isMovingToParto; // Posição de Trabalho (PT)
+  bool gavetaOpen;
+  bool gavetaLockIgnored;
 
   ChairState({
     this.reflectorOn = false,
@@ -65,6 +67,8 @@ class ChairState {
     this.shouldStopAllTimers = false,
     this.isMovingToGineco = false,
     this.isMovingToParto = false,
+    this.gavetaOpen = false,
+    this.gavetaLockIgnored = false,
   });
 
   Map<String, dynamic> toJson() {
@@ -94,6 +98,8 @@ class ChairState {
       'shouldStopAllTimers': shouldStopAllTimers,
       'isMovingToGineco': isMovingToGineco,
       'isMovingToParto': isMovingToParto,
+      'gavetaOpen': gavetaOpen,
+      'gavetaLockIgnored': gavetaLockIgnored,
     };
   }
 
@@ -125,6 +131,8 @@ class ChairState {
       shouldStopAllTimers: json['shouldStopAllTimers'] ?? false,
       isMovingToGineco: json['isMovingToGineco'] ?? false,
       isMovingToParto: json['isMovingToParto'] ?? false,
+      gavetaOpen: json['gavetaOpen'] ?? false,
+      gavetaLockIgnored: json['gavetaLockIgnored'] ?? false,
     );
   }
 }

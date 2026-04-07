@@ -220,7 +220,24 @@ class MqttService extends ChangeNotifier {
   void updateChairState(String message) {
     final confirmation = message.trim();
 
-    if (confirmation == 'SA:ON') {
+    if (confirmation == 'GAVETA_OPEN' ||
+        confirmation == 'GAVETA:OPEN' ||
+        confirmation == 'GAVETA:OPENED') {
+      _chairState.gavetaOpen = true;
+      _chairState.upperLegsOn = false;
+      _chairState.lowerLegsOn = false;
+      _chairState.shouldStopAllTimers = true;
+      _rxWatchdogs.remove('legs')?.cancel();
+    } else if (confirmation == 'GAVETA_CLOSED' ||
+        confirmation == 'GAVETA:CLOSED') {
+      _chairState.gavetaOpen = false;
+    } else if (confirmation == 'SP:GAVETA' || confirmation == 'DP:GAVETA') {
+      _chairState.gavetaOpen = true;
+      _chairState.upperLegsOn = false;
+      _chairState.lowerLegsOn = false;
+      _chairState.shouldStopAllTimers = true;
+      _rxWatchdogs.remove('legs')?.cancel();
+    } else if (confirmation == 'SA:ON') {
       _chairState.seatUpOn = true;
       _chairState.seatDownOn = false;
       _chairState.shouldStopAllTimers = false;
@@ -253,6 +270,14 @@ class MqttService extends ChangeNotifier {
         _chairState.backDownOn = false;
       });
     } else if (confirmation == 'SP:ON') {
+      if (_chairState.gavetaOpen) {
+        _chairState.upperLegsOn = false;
+        _chairState.lowerLegsOn = false;
+        _chairState.shouldStopAllTimers = true;
+        _rxWatchdogs.remove('legs')?.cancel();
+        notifyListeners();
+        return;
+      }
       _chairState.upperLegsOn = true;
       _chairState.lowerLegsOn = false;
       _chairState.shouldStopAllTimers = false;
@@ -261,6 +286,14 @@ class MqttService extends ChangeNotifier {
         _chairState.lowerLegsOn = false;
       });
     } else if (confirmation == 'DP:ON') {
+      if (_chairState.gavetaOpen) {
+        _chairState.upperLegsOn = false;
+        _chairState.lowerLegsOn = false;
+        _chairState.shouldStopAllTimers = true;
+        _rxWatchdogs.remove('legs')?.cancel();
+        notifyListeners();
+        return;
+      }
       _chairState.lowerLegsOn = true;
       _chairState.upperLegsOn = false;
       _chairState.shouldStopAllTimers = false;
@@ -305,6 +338,14 @@ class MqttService extends ChangeNotifier {
         _chairState.backDownOn = false;
       });
     } else if (confirmation == ChairCommand.upperLegs) {
+      if (_chairState.gavetaOpen) {
+        _chairState.upperLegsOn = false;
+        _chairState.lowerLegsOn = false;
+        _chairState.shouldStopAllTimers = true;
+        _rxWatchdogs.remove('legs')?.cancel();
+        notifyListeners();
+        return;
+      }
       _chairState.upperLegsOn = true;
       _chairState.lowerLegsOn = false;
       _chairState.shouldStopAllTimers = false;
@@ -313,6 +354,14 @@ class MqttService extends ChangeNotifier {
         _chairState.lowerLegsOn = false;
       });
     } else if (confirmation == ChairCommand.lowerLegs) {
+      if (_chairState.gavetaOpen) {
+        _chairState.upperLegsOn = false;
+        _chairState.lowerLegsOn = false;
+        _chairState.shouldStopAllTimers = true;
+        _rxWatchdogs.remove('legs')?.cancel();
+        notifyListeners();
+        return;
+      }
       _chairState.lowerLegsOn = true;
       _chairState.upperLegsOn = false;
       _chairState.shouldStopAllTimers = false;
@@ -341,6 +390,7 @@ class MqttService extends ChangeNotifier {
       _chairState.seatDownOn = false;
       _chairState.upperLegsOn = false;
       _chairState.lowerLegsOn = false;
+      _chairState.shouldStopAllTimers = false;
       _rxWatchdogs.remove('seat')?.cancel();
       _rxWatchdogs.remove('back')?.cancel();
       _rxWatchdogs.remove('legs')?.cancel();

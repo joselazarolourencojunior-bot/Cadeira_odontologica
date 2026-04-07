@@ -39,6 +39,7 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
   bool _mqttLastSeatDownLimit = false;
   bool _mqttLastLegUpLimit = false;
   bool _mqttLastLegDownLimit = false;
+  DateTime? _lastGavetaWarningAt;
 
   @override
   void initState() {
@@ -488,6 +489,44 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     }
   }
 
+  void _executeLegCommand(
+    BuildContext context,
+    BluetoothService bluetoothService,
+    MqttService mqttService,
+    VoidCallback command,
+  ) {
+    final lastRxAt = mqttService.lastRxAt;
+    final useMqttState =
+        mqttService.isConnected &&
+        lastRxAt != null &&
+        DateTime.now().difference(lastRxAt) < const Duration(seconds: 5);
+    final gavetaOpen = useMqttState
+        ? mqttService.chairState.gavetaOpen
+        : bluetoothService.chairState.gavetaOpen;
+
+    if (gavetaOpen) {
+      final now = DateTime.now();
+      if (_lastGavetaWarningAt == null ||
+          now.difference(_lastGavetaWarningAt!) > const Duration(seconds: 2)) {
+        _lastGavetaWarningAt = now;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Gaveta aberta: perneira bloqueada'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        Vibration.hasVibrator().then((hasVibrator) {
+          if (hasVibrator == true) {
+            Vibration.vibrate(duration: 200);
+          }
+        });
+      }
+      return;
+    }
+
+    _executeCommand(context, bluetoothService, command);
+  }
+
   void _initMqtt() {
     try {
       final mqtt = context.read<MqttService>();
@@ -578,6 +617,13 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
     final mqttRxCount = mqtt.rxCount;
     final mqttLastRxAt = mqtt.lastRxAt;
     final mqttLastRxTopic = mqtt.lastRxTopic;
+    final useMqttState =
+        mqttIsConnected &&
+        mqttLastRxAt != null &&
+        DateTime.now().difference(mqttLastRxAt) < const Duration(seconds: 5);
+    final gavetaOpen = useMqttState
+        ? mqtt.chairState.gavetaOpen
+        : bluetoothService.chairState.gavetaOpen;
 
     // Determina o status geral
     String statusText;
@@ -701,6 +747,18 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
                                     : Colors.grey))
                         : Colors.orange,
                     isActive: mqttIsConnected,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _buildStatusIndicator(
+                    icon: gavetaOpen
+                        ? Icons.inventory_2
+                        : Icons.inventory_2_outlined,
+                    label: 'Gaveta',
+                    value: gavetaOpen ? 'Aberta' : 'Fechada',
+                    color: gavetaOpen ? Colors.red : Colors.green,
+                    isActive: !gavetaOpen,
                   ),
                 ),
               ],
@@ -1150,14 +1208,16 @@ class _ChairControlScreenState extends State<ChairControlScreen> {
                           bluetoothService,
                           () => bluetoothService.moveSeatDown(),
                         ),
-                        onLegUp: () => _executeCommand(
+                        onLegUp: () => _executeLegCommand(
                           context,
                           bluetoothService,
+                          mqttService,
                           () => bluetoothService.toggleUpperLegs(),
                         ),
-                        onLegDown: () => _executeCommand(
+                        onLegDown: () => _executeLegCommand(
                           context,
                           bluetoothService,
+                          mqttService,
                           () => bluetoothService.toggleLowerLegs(),
                         ),
                         onAutoZero: () => _executeCommand(
