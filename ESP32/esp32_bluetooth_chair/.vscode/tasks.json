@@ -1,0 +1,20 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build Project",
+			"type": "shell",
+			"command": "pio run"
+		},
+		{
+			"label": "Build Project Again",
+			"type": "shell",
+			"command": "pio run"
+		},
+		{
+			"label": "Build Project Final Check",
+			"type": "shell",
+			"command": "pio run"
+		}
+	]
+}
