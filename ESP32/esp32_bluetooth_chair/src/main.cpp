@@ -69,6 +69,14 @@ static const int IO_PCF_BASE = 100;
 #define PIN_GAVETA -1
 #endif
 
+#ifndef PIN_TREN_INT_DESCE
+#define PIN_TREN_INT_DESCE -1
+#endif
+
+#ifndef PIN_INT_TREND_DESCE
+#define PIN_INT_TREND_DESCE -1
+#endif
+
 #ifndef PIN_ENCODER1
 #define PIN_ENCODER1 -1
 #endif
@@ -676,6 +684,10 @@ extern bool estado_sa;
 extern bool estado_da;
 extern bool estado_se;
 extern bool estado_de;
+extern bool estado_trend_sobe;
+extern bool estado_trend_desce;
+extern const int TREN_INT_DESCE;
+extern const int INT_TREND_DESCE;
 
 // ========== FUNÇÕES MQTT ==========
 static bool mqttPublish(const String& topic, const String& payload, bool retain) {
@@ -1000,7 +1012,7 @@ static void otaTick() {
 
 static bool mqttIsControlCommand(const String& cmdUpper) {
   return cmdUpper == "DE" || cmdUpper == "SE" || cmdUpper == "SA" || cmdUpper == "DA" ||
-         cmdUpper == "SP" || cmdUpper == "DP" || cmdUpper == "RF" || cmdUpper == "VZ" ||
+         cmdUpper == "SP" || cmdUpper == "DP" || cmdUpper == "TS" || cmdUpper == "TD" || cmdUpper == "RF" || cmdUpper == "VZ" ||
          cmdUpper == "PT" || cmdUpper == "M1" || cmdUpper == "STOP" || cmdUpper == "AT_SEG" ||
          cmdUpper == "STATUS";
 }
@@ -1225,11 +1237,15 @@ void publicaStatusMQTT() {
     doc["seatDownOn"] = estado_da;
     doc["upperLegsOn"] = estado_sp;
     doc["lowerLegsOn"] = estado_dp;
+    doc["trendUpOn"] = estado_trend_sobe;
+    doc["trendDownOn"] = estado_trend_desce;
     doc["backPosition"] = incoder_virtual_encosto_service;
     doc["seatPosition"] = incoder_virtual_asento_service;
     doc["legPosition"] = incoder_virtual_perneira_service;
     doc["gavetaOpen"] = isGavetaAbertaRaw();
     doc["gavetaLockIgnored"] = ignoreGavetaLock;
+    if (TREN_INT_DESCE >= 0) doc["trenIntDown"] = (digitalRead(TREN_INT_DESCE) == LOW);
+    if (INT_TREND_DESCE >= 0) doc["trendIntDown"] = (digitalRead(INT_TREND_DESCE) == LOW);
     String ts = getTimestamp();
     if (ts.length() > 0 && ts != "null") {
       doc["timestamp"] = ts;
@@ -1377,6 +1393,8 @@ int GAVETA = PIN_GAVETA;
 const int ENCODER1 = PIN_ENCODER1;
 const int ENCODER2 = PIN_ENCODER2;
 const int ENCODER3 = PIN_ENCODER3;
+const int TREN_INT_DESCE = PIN_TREN_INT_DESCE;
+const int INT_TREND_DESCE = PIN_INT_TREND_DESCE;
 
 static void loadGavetaPinPreference() {
   Preferences p;
@@ -1558,6 +1576,12 @@ static void applyMqttRuntimeConfig() {
 #ifndef PIN_RELE_REFLETOR
 #define PIN_RELE_REFLETOR 4
 #endif
+#ifndef PIN_RELE_TREND_DESCE
+#define PIN_RELE_TREND_DESCE -1
+#endif
+#ifndef PIN_RELE_TREND_SOBE
+#define PIN_RELE_TREND_SOBE -1
+#endif
 #ifndef PIN_LED
 #define PIN_LED 2
 #endif
@@ -1573,6 +1597,8 @@ const int Rele_SP = PIN_RELE_SP;
 const int Rele_DP = PIN_RELE_DP;
 const int LED = PIN_LED;
 const int Rele_refletor = PIN_RELE_REFLETOR;
+const int Rele_TREND_DESCE = PIN_RELE_TREND_DESCE;
+const int Rele_TREND_SOBE = PIN_RELE_TREND_SOBE;
 const int BUZZER = PIN_BUZZER;
 
 static void buzzerTestTick() {
@@ -1606,6 +1632,8 @@ static const char* relayLabelByPin(int pin) {
   if (pin == Rele_DE) return "RELE_DE";
   if (pin == Rele_SP) return "RELE_SP";
   if (pin == Rele_DP) return "RELE_DP";
+  if (pin == Rele_TREND_SOBE) return "RELE_TREND_SOBE";
+  if (pin == Rele_TREND_DESCE) return "RELE_TREND_DESCE";
   if (pin == Rele_refletor) return "RELE_REFLETOR";
   if (pin == LED) return "LED";
   if (pin == BUZZER) return "BUZZER";
@@ -1620,7 +1648,7 @@ static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
   }
   digitalWrite(pin, newValue);
   int readBack = digitalRead(pin);
-  if (pin == Rele_SA || pin == Rele_DA || pin == Rele_SE || pin == Rele_DE || pin == Rele_SP || pin == Rele_DP || pin == Rele_refletor) {
+  if (pin == Rele_SA || pin == Rele_DA || pin == Rele_SE || pin == Rele_DE || pin == Rele_SP || pin == Rele_DP || pin == Rele_refletor || pin == Rele_TREND_SOBE || pin == Rele_TREND_DESCE) {
     mqttStatusDirty = true;
   }
   if (!log) {
@@ -1662,6 +1690,12 @@ static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
   #endif
   #if (I2C_SDA == PIN_RELE_REFLETOR) || (I2C_SCL == PIN_RELE_REFLETOR)
     #error "Conflito: I2C_SDA/I2C_SCL nao pode ser igual a PIN_RELE_REFLETOR"
+  #endif
+  #if (I2C_SDA == PIN_RELE_TREND_DESCE) || (I2C_SCL == PIN_RELE_TREND_DESCE)
+    #error "Conflito: I2C_SDA/I2C_SCL nao pode ser igual a PIN_RELE_TREND_DESCE"
+  #endif
+  #if (I2C_SDA == PIN_RELE_TREND_SOBE) || (I2C_SCL == PIN_RELE_TREND_SOBE)
+    #error "Conflito: I2C_SDA/I2C_SCL nao pode ser igual a PIN_RELE_TREND_SOBE"
   #endif
 #endif
 
@@ -1720,6 +1754,8 @@ bool estado_sa = 0;
 bool estado_da = 0;
 bool estado_se = 0;
 bool estado_de = 0;
+bool estado_trend_sobe = 0;
+bool estado_trend_desce = 0;
 bool faz_bt_seg = 0;
 
 volatile uint32_t pulses_encosto = 0;
@@ -1765,6 +1801,8 @@ unsigned long ultimoComandoSA = 0;
 unsigned long ultimoComandoDA = 0;
 unsigned long ultimoComandoSP = 0;
 unsigned long ultimoComandoDP = 0;
+unsigned long ultimoComandoTrendSobe = 0;
+unsigned long ultimoComandoTrendDesce = 0;
 const uint32_t VZ_MAX_TIME_MS = 15000;
 
 // Flags para controle de fim de curso do encoder
@@ -1895,6 +1933,18 @@ void setup() {
   pinMode(SP, INPUT_PULLUP);
   pinMode(DP, INPUT_PULLUP);
   pinMode(M1, INPUT_PULLUP);
+  if (TREN_INT_DESCE >= 0) {
+    pinMode(TREN_INT_DESCE, INPUT_PULLUP);
+    Serial.print("[TREND] TREN_INT_DESCE(GPIO");
+    Serial.print(TREN_INT_DESCE);
+    Serial.println(")");
+  }
+  if (INT_TREND_DESCE >= 0) {
+    pinMode(INT_TREND_DESCE, INPUT_PULLUP);
+    Serial.print("[TREND] INT_TREND_DESCE(GPIO");
+    Serial.print(INT_TREND_DESCE);
+    Serial.println(")");
+  }
   if (GAVETA >= 0) {
     pinMode(GAVETA, INPUT_PULLUP);
     Serial.print("[GAVETA] GPIO=");
@@ -1935,6 +1985,8 @@ void setup() {
   pinMode(BUZZER, OUTPUT);
   pinMode(LED, OUTPUT);
   pinMode(Rele_refletor, OUTPUT);
+  if (Rele_TREND_DESCE >= 0) pinMode(Rele_TREND_DESCE, OUTPUT);
+  if (Rele_TREND_SOBE >= 0) pinMode(Rele_TREND_SOBE, OUTPUT);
 
   // Desliga todos os relÃ©s no inÃ­cio
   setOutputPin(Rele_SA, false, nullptr, false);
@@ -1944,6 +1996,8 @@ void setup() {
   setOutputPin(Rele_DP, false, nullptr, false);
   setOutputPin(Rele_SP, false, nullptr, false);
   setOutputPin(Rele_refletor, false, nullptr, false);
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, nullptr, false);
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, nullptr, false);
   Serial.println("Pinos configurados.");
   delay(500);
 
@@ -2139,6 +2193,24 @@ void verificaTimeoutMotores() {
     faz_bt_seg = 0;
     enviarBLE("DP:TIMEOUT");
     Serial.println("[TIMEOUT] Motor DP desligado por seguranca");
+  }
+
+  // TS - Trend sobe
+  if (estado_trend_sobe && (agora - ultimoComandoTrendSobe) > MOTOR_TIMEOUT) {
+    estado_trend_sobe = false;
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TIMEOUT");
+    faz_bt_seg = 0;
+    enviarBLE("TS:TIMEOUT");
+    Serial.println("[TIMEOUT] Motor TS desligado por seguranca");
+  }
+
+  // TD - Trend desce
+  if (estado_trend_desce && (agora - ultimoComandoTrendDesce) > MOTOR_TIMEOUT) {
+    estado_trend_desce = false;
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TIMEOUT");
+    faz_bt_seg = 0;
+    enviarBLE("TD:TIMEOUT");
+    Serial.println("[TIMEOUT] Motor TD desligado por seguranca");
   }
 }
 
@@ -3060,6 +3132,51 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("DP:LIMIT");
     }
   }
+  else if (cmd == "TS") {
+    if (Rele_TREND_SOBE < 0) {
+      enviarBLE("TS:NA");
+      return;
+    }
+    ultimoComandoTrendSobe = millis();
+    if (!estado_trend_sobe) {
+      estado_trend_sobe = true;
+      estado_trend_desce = false;
+      if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TS");
+      setOutputPin(Rele_TREND_SOBE, true, "TS");
+      faz_bt_seg = 1;
+      enviarBLE("TS:ON");
+      iniciaTimerMotor();
+    } else {
+      enviarBLE("TS:KEEP");
+    }
+  }
+  else if (cmd == "TD") {
+    if (Rele_TREND_DESCE < 0) {
+      enviarBLE("TD:NA");
+      return;
+    }
+    bool limitDown = false;
+    if (TREN_INT_DESCE >= 0 && digitalRead(TREN_INT_DESCE) == LOW) limitDown = true;
+    if (INT_TREND_DESCE >= 0 && digitalRead(INT_TREND_DESCE) == LOW) limitDown = true;
+    if (limitDown) {
+      enviarBLE("TD:LIMIT");
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TD_LIMIT", false);
+      mqttStatusDirty = true;
+      return;
+    }
+    ultimoComandoTrendDesce = millis();
+    if (!estado_trend_desce) {
+      estado_trend_desce = true;
+      estado_trend_sobe = false;
+      if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TD");
+      setOutputPin(Rele_TREND_DESCE, true, "TD");
+      faz_bt_seg = 1;
+      enviarBLE("TD:ON");
+      iniciaTimerMotor();
+    } else {
+      enviarBLE("TD:KEEP");
+    }
+  }
   else if (cmd == "VZ") {
     // PosiÃ§Ã£o ginecolÃ³gica
     enviarBLE("VZ:EXEC");
@@ -3194,7 +3311,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
 
 // Envia status completo via BLE em formato JSON
 void enviaStatusBluetooth() {
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<640> doc;
   
   doc["serial"] = NUMERO_SERIE_CADEIRA;
   doc["habilitada"] = cadeiraHabilitada;
@@ -3208,6 +3325,11 @@ void enviaStatusBluetooth() {
   doc["encosto_pos"] = incoder_virtual_encosto_service;
   doc["assento_pos"] = incoder_virtual_asento_service;
   doc["perneira_pos"] = incoder_virtual_perneira_service;
+  doc["gaveta_open"] = isGavetaAbertaRaw();
+  doc["trend_sobe_on"] = estado_trend_sobe;
+  doc["trend_desce_on"] = estado_trend_desce;
+  if (TREN_INT_DESCE >= 0) doc["tren_int_desce"] = (digitalRead(TREN_INT_DESCE) == LOW);
+  if (INT_TREND_DESCE >= 0) doc["int_trend_desce"] = (digitalRead(INT_TREND_DESCE) == LOW);
   
   // Limites
   doc["se_limit"] = trava_bt_SE;
@@ -3245,7 +3367,9 @@ void atualizaHorimetro() {
   // Verifica se algum motor está ligado (HIGH = ligado)
   bool algumMotorLigado = (digitalRead(Rele_SA) == HIGH) || (digitalRead(Rele_DA) == HIGH) ||
                           (digitalRead(Rele_SE) == HIGH) || (digitalRead(Rele_DE) == HIGH) ||
-                          (digitalRead(Rele_SP) == HIGH) || (digitalRead(Rele_DP) == HIGH);
+                          (digitalRead(Rele_SP) == HIGH) || (digitalRead(Rele_DP) == HIGH) ||
+                          (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) ||
+                          (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH);
   
   if (algumMotorLigado && !motorLigado) {
     iniciaTimerMotor();
@@ -4185,7 +4309,9 @@ void monitora_tempo_rele() {
                          digitalRead(Rele_DA) == HIGH || 
                          digitalRead(Rele_SP) == HIGH || 
                          digitalRead(Rele_DP) == HIGH || 
-                         digitalRead(Rele_DE) == HIGH);
+                         digitalRead(Rele_DE) == HIGH ||
+                         (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) ||
+                         (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH));
 
   if (algumReleAtivo) {
     if (inicioAtivacaoRele == 0) {
@@ -5057,6 +5183,8 @@ void AT_SEG() {
     setOutputPin(Rele_DA, false, "AT_SEG");
     setOutputPin(Rele_SP, false, "AT_SEG");
     setOutputPin(Rele_DP, false, "AT_SEG");
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "AT_SEG");
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "AT_SEG");
 
     // Atualiza estados
     estado_de = false;
@@ -5065,6 +5193,8 @@ void AT_SEG() {
     estado_da = false;
     estado_sp = false;
     estado_dp = false;
+    estado_trend_sobe = false;
+    estado_trend_desce = false;
 
     faz_bt_seg = 0;
     cont = 0;
