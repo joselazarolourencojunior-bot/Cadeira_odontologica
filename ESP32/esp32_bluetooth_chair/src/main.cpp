@@ -97,6 +97,10 @@ static const int IO_PCF_BASE = 100;
 #define PIN_ENCODER3 -1
 #endif
 
+#ifndef PIN_ENCODER_TREND
+#define PIN_ENCODER_TREND 46
+#endif
+
 #ifndef I2C_EARLY_TEST
 #define I2C_EARLY_TEST 0
 #endif
@@ -496,8 +500,9 @@ static void IO_digitalWrite(int pin, uint8_t value) {
 
 // ========== CONFIGURAÇÕES SUPABASE ==========
 const char* SUPABASE_URL = "https://mkoqceekhnkpviixqnnk.supabase.co";
+const char* SUPABASE_KEY = "sb_publishable_HLUfLEw2UuIWjzd5LfqLkw_oaodzV7V";
 static String supabaseUrl = SUPABASE_URL;
-static String supabaseKey = "";
+static String supabaseKey = SUPABASE_KEY;
 const char* SENHA_AP = "12345678";                  // Senha da rede de configuração (mínimo 8 caracteres)
 // ============================================
 
@@ -557,7 +562,29 @@ WiFiClient mqttPlainClient;
 WiFiClientSecure mqttSecureClient;
 PubSubClient mqttClient(mqttPlainClient);
 static bool beepNetMqttOkDone = false;
-static bool buzzerTestEnabled = true;
+static bool beepMqttErrorDone = false;
+static bool beepSupabaseOkDone = false;
+static uint32_t beepSupabaseErrorNextMs = 0;
+static uint32_t mqttReadyAtMs = 0;
+static bool mqttConnectEnabled = false;
+static bool audibleErrorBeeps = true;
+static uint32_t bootStartedAtMs = 0;
+static uint32_t wifiOkAtMs = 0;
+static uint32_t wifiLostAtMs = 0;
+static uint32_t mqttOkAtMs = 0;
+static uint32_t mqttLostAtMs = 0;
+static uint32_t supabaseOkAtMs = 0;
+static uint32_t supabaseFailAtMs = 0;
+static uint32_t alarmNextMs = 0;
+
+static bool beepSeqActive = false;
+static uint8_t beepSeqRemaining = 0;
+static uint32_t beepSeqNextMs = 0;
+static bool beepSeqBuzzerOn = false;
+static bool beepSeqRestorePulse = false;
+static uint16_t beepSeqOnMs = 100;
+static uint16_t beepSeqOffMs = 120;
+static bool buzzerTestEnabled = false;
 static bool buzzerTestIsOn = false;
 static uint32_t buzzerTestNextOnMs = 0;
 static uint32_t buzzerTestOffAtMs = 0;
@@ -670,6 +697,7 @@ void executa_M1();
 void executa_pt();
 void AT_SEG();
 void bip();
+void bipLong();
 void enviarBLE(String msg);
 void verificaBotaoResetWifi();
 void resetaConfiguracoesWifi();
@@ -1139,6 +1167,9 @@ void reconnectMQTT() {
     }
     if (ok) {
       Serial.println("conectado!");
+      beepMqttErrorDone = false;
+      mqttOkAtMs = millis();
+      mqttLostAtMs = 0;
       
       // Inscreve-se no tópico de comandos
       String commandTopic = MQTT_TOPIC_BASE + "command";
@@ -1156,8 +1187,8 @@ void reconnectMQTT() {
 
       // Não publica status inicial
       if (!beepNetMqttOkDone && WiFi.status() == WL_CONNECTED) {
-        bip();
-        delay(100);
+        bip(); delay(120);
+        bip(); delay(120);
         bip();
         Serial.println("[BUZZER] WiFi+MQTT OK");
         beepNetMqttOkDone = true;
@@ -1187,6 +1218,15 @@ static void mqttTaskMain(void* pvParameters) {
       continue;
     }
     if (WiFi.status() == WL_CONNECTED) {
+      uint32_t now = millis();
+      if (!mqttConnectEnabled) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        continue;
+      }
+      if (mqttReadyAtMs != 0 && static_cast<int32_t>(now - mqttReadyAtMs) < 0) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        continue;
+      }
       reconnectMQTT();
       if (mqttClient.connected()) {
         if (mqttLockMs(50)) {
@@ -1273,10 +1313,13 @@ void publicaStatusMQTT() {
 }
 
 #if HAS_BLE
+static void beepSeqStart(uint8_t count, uint16_t onMs, uint16_t offMs);
+
 class MyServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     bleClienteConectado = true;
     bleAdvertisingAtivo = false;
+    beepSeqStart(4, 100, 120);
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO CONECTADO!");
     Serial.println("====================================");
@@ -1408,6 +1451,7 @@ int GAVETA = PIN_GAVETA;
 const int ENCODER1 = PIN_ENCODER1;
 const int ENCODER2 = PIN_ENCODER2;
 const int ENCODER3 = PIN_ENCODER3;
+const int ENCODER_TREND = PIN_ENCODER_TREND;
 const int TREN_INT_DESCE = PIN_TREN_INT_DESCE;
 const int INT_TREND_DESCE = PIN_INT_TREND_DESCE;
 const int TREN_INT_SOBE = PIN_TREN_INT_SOBE;
@@ -1483,10 +1527,6 @@ static void loadMqttPreferences() {
   if (!p.begin("mqtt", true)) {
     return;
   }
-  bool migrated = false;
-  if (p.isKey("migrated")) {
-    migrated = p.getBool("migrated", false);
-  }
   if (p.isKey("host")) {
     mqttHost = p.getString("host", mqttHost);
   }
@@ -1512,28 +1552,6 @@ static void loadMqttPreferences() {
     mqttCleanSession = p.getBool("clean", mqttCleanSession);
   }
   p.end();
-
-  if (!migrated && mqttHost == "broker.emqx.io") {
-    mqttHost = "test.mosquitto.org";
-    mqttPort = 1883;
-    mqttUser = "";
-    mqttPass = "";
-    mqttUseTls = false;
-    mqttClientId = "";
-    mqttCleanSession = true;
-    Preferences w;
-    if (w.begin("mqtt", false)) {
-      w.putString("host", mqttHost);
-      w.putUInt("port", mqttPort);
-      w.putString("user", mqttUser);
-      w.putString("pass", mqttPass);
-      w.putBool("tls", mqttUseTls);
-      w.putString("cid", mqttClientId);
-      w.putBool("clean", mqttCleanSession);
-      w.putBool("migrated", true);
-      w.end();
-    }
-  }
 }
 
 static void saveMqttPreferences() {
@@ -1566,6 +1584,14 @@ static void applyMqttRuntimeConfig() {
     mqttClient.setClient(mqttSecureClient);
   } else {
     mqttClient.setClient(mqttPlainClient);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    IPAddress ip;
+    if (WiFi.hostByName(mqttHost.c_str(), ip) == 1) {
+      mqttClient.setServer(ip, mqttPort);
+      mqttUnlock();
+      return;
+    }
   }
   mqttClient.setServer(mqttHost.c_str(), mqttPort);
   mqttUnlock();
@@ -1639,6 +1665,108 @@ static void buzzerTestTick() {
   if (static_cast<int32_t>(now - buzzerTestOffAtMs) >= 0) {
     digitalWrite(BUZZER, LOW);
     buzzerTestIsOn = false;
+  }
+}
+
+static void buzzerPulseStart2s() {
+  buzzerTestEnabled = true;
+  buzzerTestIsOn = false;
+  buzzerTestNextOnMs = millis();
+  buzzerTestOffAtMs = 0;
+}
+
+static void buzzerPulseStop() {
+  buzzerTestEnabled = false;
+  digitalWrite(BUZZER, LOW);
+  buzzerTestIsOn = false;
+}
+
+static void beepSeqStart(uint8_t count, uint16_t onMs, uint16_t offMs) {
+  if (count == 0) return;
+  beepSeqRestorePulse = buzzerTestEnabled;
+  buzzerPulseStop();
+  beepSeqActive = true;
+  beepSeqRemaining = count;
+  beepSeqBuzzerOn = false;
+  beepSeqOnMs = onMs;
+  beepSeqOffMs = offMs;
+  beepSeqNextMs = millis();
+}
+
+static void beepSeqTick() {
+  if (!beepSeqActive) return;
+  uint32_t now = millis();
+  if (static_cast<int32_t>(now - beepSeqNextMs) < 0) return;
+  if (!beepSeqBuzzerOn) {
+    digitalWrite(BUZZER, HIGH);
+    beepSeqBuzzerOn = true;
+    beepSeqNextMs = now + beepSeqOnMs;
+    return;
+  }
+  digitalWrite(BUZZER, LOW);
+  beepSeqBuzzerOn = false;
+  if (beepSeqRemaining > 0) {
+    beepSeqRemaining--;
+  }
+  if (beepSeqRemaining == 0) {
+    beepSeqActive = false;
+    if (beepSeqRestorePulse) {
+      buzzerPulseStart2s();
+    }
+    return;
+  }
+  beepSeqNextMs = now + beepSeqOffMs;
+}
+
+static void alarmTick() {
+  if (!audibleErrorBeeps) return;
+  if (beepSeqActive) return;
+  if (buzzerTestEnabled) return;
+  uint32_t now = millis();
+  if (bootStartedAtMs == 0) {
+    bootStartedAtMs = now;
+  }
+
+  bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+  bool mqttConnected = mqttClient.connected();
+
+  if (wifiConnected) {
+    if (wifiOkAtMs == 0) wifiOkAtMs = now;
+    wifiLostAtMs = 0;
+  } else if (wifiOkAtMs != 0) {
+    if (wifiLostAtMs == 0) wifiLostAtMs = now;
+  }
+
+  if (mqttConnected) {
+    if (mqttOkAtMs == 0) mqttOkAtMs = now;
+    mqttLostAtMs = 0;
+  } else if (mqttOkAtMs != 0) {
+    if (mqttLostAtMs == 0) mqttLostAtMs = now;
+  }
+
+  if (alarmNextMs != 0 && static_cast<int32_t>(now - alarmNextMs) < 0) {
+    return;
+  }
+
+  if (!wifiConnected) {
+    if ((now - bootStartedAtMs) > 45000 || (wifiLostAtMs != 0 && (now - wifiLostAtMs) > 60000)) {
+      beepSeqStart(3, 400, 150);
+      alarmNextMs = now + 10000;
+    }
+    return;
+  }
+
+  if (!mqttConnected) {
+    if ((wifiOkAtMs != 0 && (now - wifiOkAtMs) > 45000) || (mqttLostAtMs != 0 && (now - mqttLostAtMs) > 60000)) {
+      beepSeqStart(3, 400, 150);
+      alarmNextMs = now + 10000;
+    }
+    return;
+  }
+
+  if (supabaseOkAtMs == 0 && supabaseFailAtMs != 0 && (now - supabaseFailAtMs) > 60000) {
+    beepSeqStart(3, 400, 150);
+    alarmNextMs = now + 10000;
   }
 }
 
@@ -1778,9 +1906,12 @@ bool faz_bt_seg = 0;
 volatile uint32_t pulses_encosto = 0;
 volatile uint32_t pulses_assento = 0;
 volatile uint32_t pulses_perneira = 0;
+volatile uint32_t pulses_trend = 0;
 static uint32_t last_pulses_encosto = 0;
 static uint32_t last_pulses_assento = 0;
 static uint32_t last_pulses_perneira = 0;
+static uint32_t last_pulses_trend = 0;
+static uint32_t trendLastPulseAtMs = 0;
 
 static uint64_t motorTravelPulsesEncosto = 0;
 static uint64_t motorTravelPulsesAssento = 0;
@@ -1804,6 +1935,7 @@ static bool encoderPulseDebug = false;
 static void IRAM_ATTR isr_encoder1() { pulses_assento++; }
 static void IRAM_ATTR isr_encoder2() { pulses_perneira++; }
 static void IRAM_ATTR isr_encoder3() { pulses_encosto++; }
+static void IRAM_ATTR isr_encoder_trend() { pulses_trend++; }
 
 // Debounce para comandos BLE
 unsigned long ultimoComandoBLE = 0;
@@ -1853,6 +1985,7 @@ void monitoraSistema();
 
 // ========== SETUP ==========
 void setup() {
+  bootStartedAtMs = millis();
   // WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Desabilita detector de Brownout - not needed in Arduino
   setCpuFrequencyMhz(80); // Reduz frequÃªncia para 80MHz durante inicializaÃ§Ã£o
   
@@ -1984,6 +2117,9 @@ void setup() {
   pinMode(ENCODER1, INPUT_PULLUP);
   pinMode(ENCODER2, INPUT_PULLUP);
   pinMode(ENCODER3, INPUT_PULLUP);
+  if (ENCODER_TREND >= 0) {
+    pinMode(ENCODER_TREND, INPUT_PULLUP);
+  }
   if (TEST_MODE) {
     Serial.println("[ENC] TEST_MODE=1: interrupcoes de encoder desabilitadas");
   } else {
@@ -2002,6 +2138,11 @@ void setup() {
     } else {
       Serial.println("[ENC] ENCODER3 desabilitado");
     }
+    if (ENCODER_TREND >= 0 && ENCODER_TREND != I2C_SDA && ENCODER_TREND != I2C_SCL && ENCODER_TREND != Rele_refletor) {
+      attachInterrupt(digitalPinToInterrupt(ENCODER_TREND), isr_encoder_trend, FALLING);
+    } else {
+      Serial.println("[ENC] ENCODER_TREND desabilitado");
+    }
   }
 
   // Inicializa pinos de saÃ­da
@@ -2012,6 +2153,7 @@ void setup() {
   pinMode(Rele_DP, OUTPUT);
   pinMode(Rele_SP, OUTPUT);
   pinMode(BUZZER, OUTPUT);
+  digitalWrite(BUZZER, LOW);
   pinMode(LED, OUTPUT);
   pinMode(Rele_refletor, OUTPUT);
   if (Rele_TREND_DESCE >= 0) pinMode(Rele_TREND_DESCE, OUTPUT);
@@ -2057,15 +2199,6 @@ void setup() {
   return;
 #endif
 
-  // ===== EXECUTA VZ INICIAL ANTES DE TUDO =====
-  Serial.println("\n====================================");
-  Serial.println("  EXECUTANDO VZ INICIAL");
-  Serial.println("  (ANTES de WiFi e Bluetooth)");
-  Serial.println("====================================");
-  executa_vz_ini();
-  Serial.println("[OK] VZ inicial finalizado.");
-  Serial.println("====================================\n");
-  delay(1000);
   Serial.println("Inicio programa cadeira GO - Com WiFiManager + Supabase");
 
   // Carrega dados salvos (encoder virtual e horÃ­metro)
@@ -2084,6 +2217,8 @@ void setup() {
 
   // Inicializa MQTT se WiFi estiver conectado
   if (WiFi.status() == WL_CONNECTED) {
+    mqttConnectEnabled = false;
+    mqttReadyAtMs = 0;
     Serial.println("\n====================================");
     Serial.println("  INICIALIZANDO MQTT");
     Serial.println("====================================");
@@ -2146,6 +2281,24 @@ void setup() {
     Serial.println("WiFi Status: DESCONECTADO");
     Serial.println("[INFO] Pulando verificacao inicial - modo offline.");
   }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    mqttConnectEnabled = true;
+    mqttReadyAtMs = millis() + 1000;
+    uint32_t waitUntil = millis() + 15000;
+    while (!mqttClient.connected() && static_cast<int32_t>(millis() - waitUntil) < 0) {
+      reconnectMQTT();
+      delay(50);
+    }
+  }
+
+  Serial.println("\n====================================");
+  Serial.println("  EXECUTANDO VZ INICIAL");
+  Serial.println("  (APOS WiFi/MQTT/Supabase)");
+  Serial.println("====================================");
+  executa_vz_ini();
+  Serial.println("[OK] VZ inicial finalizado.");
+  Serial.println("====================================\n");
   
   Serial.println("\n====================================");
   Serial.println("       SISTEMA PRONTO!");
@@ -2160,10 +2313,6 @@ void setup() {
   Serial.print(ESP.getFreeHeap());
   Serial.println(" bytes");
   Serial.println("====================================");
-  
-  bip();
-  delay(100);
-  bip();
 }
 
 static bool trendInputsConfigured() {
@@ -2298,6 +2447,8 @@ static void trendTickInputs() {
 
   if (up) {
     ultimoComandoTrendSobe = millis();
+    trendLastPulseAtMs = ultimoComandoTrendSobe;
+    last_pulses_trend = pulses_trend;
     estado_trend_sobe = true;
     estado_trend_desce = false;
     if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_IN");
@@ -2310,6 +2461,8 @@ static void trendTickInputs() {
   }
   if (down) {
     ultimoComandoTrendDesce = millis();
+    trendLastPulseAtMs = ultimoComandoTrendDesce;
+    last_pulses_trend = pulses_trend;
     estado_trend_desce = true;
     estado_trend_sobe = false;
     if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_IN");
@@ -2341,6 +2494,11 @@ static void trendTickInputs() {
 // ========== MONITORAMENTO DE TIMEOUT DOS MOTORES (DEAD MAN'S SWITCH) ==========
 void verificaTimeoutMotores() {
   unsigned long agora = millis();
+  uint32_t curTrend = pulses_trend;
+  if (curTrend != last_pulses_trend) {
+    last_pulses_trend = curTrend;
+    trendLastPulseAtMs = agora;
+  }
   
   // SE - Encosto sobe
   if (estado_se && (agora - ultimoComandoSE) > MOTOR_TIMEOUT) {
@@ -2422,6 +2580,16 @@ void verificaTimeoutMotores() {
     enviarBLE("TD:TIMEOUT");
     Serial.println("[TIMEOUT] Motor TD desligado por seguranca");
   }
+
+  if ((estado_trend_sobe || estado_trend_desce) && ENCODER_TREND >= 0 && trendLastPulseAtMs > 0 && (agora - trendLastPulseAtMs) > 500) {
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_ENC");
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_ENC");
+    estado_trend_sobe = false;
+    estado_trend_desce = false;
+    faz_bt_seg = 0;
+    enviarBLE("TREND:STALL");
+    Serial.println("[TREND_ENC] Sem pulsos. Trend desligado por seguranca");
+  }
 }
 
 // ========== LOOP PRINCIPAL ==========
@@ -2490,6 +2658,8 @@ void loop() {
   contagem_tempo_incoder_virtual();
   Watch_Dog();
   buzzerTestTick();
+  beepSeqTick();
+  alarmTick();
   Button_Seg();
   Button_geral();
   monitora_tempo_rele();
@@ -2542,11 +2712,7 @@ void configuraWiFiManager() {
   if (!wifiManager.autoConnect(NOME_DISPOSITIVO.c_str(), SENHA_AP)) {
     Serial.println("[WiFi] Falha na conexÃ£o - timeout");
     Serial.println("[WiFi] Continuando em modo offline...");
-    
-    // 3 bips indicam falha
-    bip(); delay(200);
-    bip(); delay(200);
-    bip();
+    wifiLostAtMs = millis();
   } else {
     Serial.println("WiFi conectado!");
     Serial.print("IP: ");
@@ -2554,9 +2720,9 @@ void configuraWiFiManager() {
     Serial.print("SSID: ");
     Serial.println(WiFi.SSID());
     
-    // 2 bips indicam sucesso
-    bip(); delay(100);
     bip();
+    wifiOkAtMs = millis();
+    wifiLostAtMs = 0;
     supabaseLogUsage("WIFI_CONNECTED");
     #if !(PORTS_ONLY) && !(PORTS_VERIFY)
     iniciaCalibracaoSeNecessario();
@@ -4186,6 +4352,13 @@ void verificaStatusCadeira() {
     Serial.print("HTTP Code: "); Serial.println(httpCode);
     
     if (httpCode == 200) {
+      if (!beepSupabaseOkDone) {
+        bip(); delay(120);
+        bip();
+        beepSupabaseOkDone = true;
+      }
+      supabaseOkAtMs = millis();
+      supabaseFailAtMs = 0;
       String response = http.getString();
       Serial.print("Resposta: "); Serial.println(response);
       
@@ -4235,10 +4408,12 @@ void verificaStatusCadeira() {
       }
     } else {
       Serial.print("Erro HTTP: "); Serial.println(httpCode);
+      if (supabaseFailAtMs == 0) supabaseFailAtMs = millis();
     }
     http.end();
   } else {
     Serial.println("Falha ao iniciar conexao HTTP");
+    if (supabaseFailAtMs == 0) supabaseFailAtMs = millis();
   }
 }
 
@@ -4289,26 +4464,39 @@ void bipBloqueio() {
 
 // ========== CARREGAMENTO DE PREFERÃŠNCIAS ==========
 void carregaPreferencias() {
-  preferences.begin("cadeira", true);
+  if (!preferences.begin("cadeira", true)) {
+    preferences.begin("cadeira", false);
+  }
   supabaseUserId = preferences.getString("user_id", "");
   supabaseMaintenanceRequestSent = preferences.getBool("mnt_sent", false);
   preferences.end();
 
-  preferences.begin("supabase", true);
+  if (!preferences.begin("supabase", true)) {
+    preferences.begin("supabase", false);
+  }
   supabaseUrl = preferences.getString("url", SUPABASE_URL);
-  supabaseKey = preferences.getString("key", "");
+  supabaseKey = preferences.getString("key", SUPABASE_KEY);
+  if (supabaseKey.length() == 0) {
+    supabaseKey = SUPABASE_KEY;
+  }
   preferences.end();
 
   // Carrega posiÃ§Ãµes do encoder virtual M1
-  preferences.begin("encoder_encosto", true);
+  if (!preferences.begin("encoder_encosto", true)) {
+    preferences.begin("encoder_encosto", false);
+  }
   incoder_virtual_encosto_M1 = preferences.getInt("encoder_encosto", 0);
   preferences.end();
   
-  preferences.begin("encoder_asento", true);
+  if (!preferences.begin("encoder_asento", true)) {
+    preferences.begin("encoder_asento", false);
+  }
   incoder_virtual_asento_M1 = preferences.getInt("encoder_asento", 0);
   preferences.end();
   
-  preferences.begin("encoder_perneira", true);
+  if (!preferences.begin("encoder_perneira", true)) {
+    preferences.begin("encoder_perneira", false);
+  }
   incoder_virtual_perneira_M1 = preferences.getInt("encoder_perneira", 0);
   preferences.end();
 
@@ -5026,6 +5214,7 @@ void executaCalibracao() {
 void executa_vz() {
   Serial.println("VZ acionado");
   bip();
+  buzzerPulseStart2s();
 
   bool checkEnc = (fim_encosto_encoder == 0 && fim_asento_encoder == 0 && fim_perneira_encoder == 0);
   int startEncPos = incoder_virtual_encosto_service;
@@ -5058,6 +5247,7 @@ void executa_vz() {
 
   while (cont == 1) {
     Watch_Dog();
+    buzzerTestTick();
     delay(1);
     
     // Verifica parada via BLE
@@ -5070,6 +5260,7 @@ void executa_vz() {
         AT_SEG();
         cont = 0;
         contador2 = 0;
+        buzzerPulseStop();
         return;
       }
     }
@@ -5108,6 +5299,7 @@ void executa_vz() {
   }
 
   bip();
+  buzzerPulseStop();
   faz_bt_seg = 0;
   Serial.println("Fim VZ");
   enviarBLE("VZ:DONE");
@@ -5124,6 +5316,7 @@ void executa_vz_ini() {
   Serial.println("====================================");
   Serial.println("Executando VZ inicial - Ativando reles sequencialmente");
   Serial.println("[INFO] Bloqueando loop() durante VZ inicial...");
+  buzzerPulseStart2s();
   vzInicialEmAndamento = true; // Bloqueia loop() completamente
   
   Serial.println("[INFO] Desabilitando controle de encoder virtual temporariamente...");
@@ -5163,6 +5356,7 @@ void executa_vz_ini() {
   while (millis() - startTime < VZ_MAX_TIME_MS) {
     yield();  // Alimenta watchdog continuamente
     Watch_Dog();
+    buzzerTestTick();
     if (checkEnc) {
       contagem_tempo_incoder_virtual();
     }
@@ -5217,12 +5411,14 @@ void executa_vz_ini() {
   
   Serial.println("[INFO] Desbloqueando loop() - VZ inicial completo.");
   vzInicialEmAndamento = false; // Libera loop() para executar normalmente
+  buzzerPulseStop();
 }
 
 // ========== EXECUÃ‡ÃƒO DA POSIÃ‡ÃƒO DE PARTO (PT) ==========
 void executa_pt() {
   Serial.println("PT acionado");
   bip();
+  buzzerPulseStart2s();
 
   setOutputPin(Rele_SA, true, "PT");
   delay(250);
@@ -5235,6 +5431,7 @@ void executa_pt() {
 
   while (cont13 == 1) {
     Watch_Dog();
+    buzzerTestTick();
     delay(1);
     
     // Verifica parada via BLE
@@ -5247,6 +5444,7 @@ void executa_pt() {
         AT_SEG();
         cont13 = 0;
         contador = 0;
+        buzzerPulseStop();
         return;
       }
     }
@@ -5265,6 +5463,7 @@ void executa_pt() {
       contador = 0;
 
       bip();
+      buzzerPulseStop();
       faz_bt_seg = 0;
       Serial.println("Fim PT");
       enviarBLE("PT:DONE");
@@ -5482,6 +5681,12 @@ void bip() {
   digitalWrite(BUZZER, LOW);
 }
 
+void bipLong() {
+  digitalWrite(BUZZER, HIGH);
+  delay(400);
+  digitalWrite(BUZZER, LOW);
+}
+
 // ========== MONITORAMENTO DO SISTEMA (DEBUG) ==========
 void monitoraSistema() {
   if (millis() - ultimoMonitoramentoSistema < INTERVALO_MONITORAMENTO) return;
@@ -5513,6 +5718,11 @@ void monitoraSistema() {
 #endif
   Serial.print("Horimetro: "); Serial.println(horimetro);
   Serial.print("Cadeira Habilitada: "); Serial.println(cadeiraHabilitada ? "SIM" : "NAO");
+  if (!cadeiraHabilitada && !buzzerTestEnabled) {
+    bip(); delay(120);
+    bip(); delay(120);
+    bip();
+  }
   Serial.print("MQTT Status: ");
   bool mqttConnected = mqttClient.connected();
   String hostSnapshot;
