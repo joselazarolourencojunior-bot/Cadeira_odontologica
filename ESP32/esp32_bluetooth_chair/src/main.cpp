@@ -77,6 +77,14 @@ static const int IO_PCF_BASE = 100;
 #define PIN_INT_TREND_DESCE -1
 #endif
 
+#ifndef PIN_TREN_INT_SOBE
+#define PIN_TREN_INT_SOBE -1
+#endif
+
+#ifndef PIN_INT_TREND_SOBE
+#define PIN_INT_TREND_SOBE -1
+#endif
+
 #ifndef PIN_ENCODER1
 #define PIN_ENCODER1 -1
 #endif
@@ -553,6 +561,9 @@ static bool buzzerTestEnabled = true;
 static bool buzzerTestIsOn = false;
 static uint32_t buzzerTestNextOnMs = 0;
 static uint32_t buzzerTestOffAtMs = 0;
+static bool trendDebugEnabled = false;
+static uint32_t trendDebugNextMs = 0;
+static uint32_t trendDebugIntervalMs = 500;
 
 // Número de série único baseado no MAC ID do ESP32
 String NUMERO_SERIE_CADEIRA = "";
@@ -688,6 +699,8 @@ extern bool estado_trend_sobe;
 extern bool estado_trend_desce;
 extern const int TREN_INT_DESCE;
 extern const int INT_TREND_DESCE;
+extern const int TREN_INT_SOBE;
+extern const int INT_TREND_SOBE;
 
 // ========== FUNÇÕES MQTT ==========
 static bool mqttPublish(const String& topic, const String& payload, bool retain) {
@@ -1012,7 +1025,7 @@ static void otaTick() {
 
 static bool mqttIsControlCommand(const String& cmdUpper) {
   return cmdUpper == "DE" || cmdUpper == "SE" || cmdUpper == "SA" || cmdUpper == "DA" ||
-         cmdUpper == "SP" || cmdUpper == "DP" || cmdUpper == "TS" || cmdUpper == "TD" || cmdUpper == "RF" || cmdUpper == "VZ" ||
+         cmdUpper == "SP" || cmdUpper == "DP" || cmdUpper == "TS" || cmdUpper == "TD" || cmdUpper == "TREND_TEST" || cmdUpper == "RF" || cmdUpper == "VZ" ||
          cmdUpper == "PT" || cmdUpper == "M1" || cmdUpper == "STOP" || cmdUpper == "AT_SEG" ||
          cmdUpper == "STATUS";
 }
@@ -1244,8 +1257,10 @@ void publicaStatusMQTT() {
     doc["legPosition"] = incoder_virtual_perneira_service;
     doc["gavetaOpen"] = isGavetaAbertaRaw();
     doc["gavetaLockIgnored"] = ignoreGavetaLock;
-    if (TREN_INT_DESCE >= 0) doc["trenIntDown"] = (digitalRead(TREN_INT_DESCE) == LOW);
-    if (INT_TREND_DESCE >= 0) doc["trendIntDown"] = (digitalRead(INT_TREND_DESCE) == LOW);
+    if (TREN_INT_DESCE >= 0) doc["trenIntDown"] = (digitalRead(TREN_INT_DESCE) == HIGH);
+    if (INT_TREND_DESCE >= 0) doc["trendIntDown"] = (digitalRead(INT_TREND_DESCE) == HIGH);
+    if (TREN_INT_SOBE >= 0) doc["trenIntUp"] = (digitalRead(TREN_INT_SOBE) == HIGH);
+    if (INT_TREND_SOBE >= 0) doc["trendIntUp"] = (digitalRead(INT_TREND_SOBE) == HIGH);
     String ts = getTimestamp();
     if (ts.length() > 0 && ts != "null") {
       doc["timestamp"] = ts;
@@ -1395,6 +1410,8 @@ const int ENCODER2 = PIN_ENCODER2;
 const int ENCODER3 = PIN_ENCODER3;
 const int TREN_INT_DESCE = PIN_TREN_INT_DESCE;
 const int INT_TREND_DESCE = PIN_INT_TREND_DESCE;
+const int TREN_INT_SOBE = PIN_TREN_INT_SOBE;
+const int INT_TREND_SOBE = PIN_INT_TREND_SOBE;
 
 static void loadGavetaPinPreference() {
   Preferences p;
@@ -1934,15 +1951,27 @@ void setup() {
   pinMode(DP, INPUT_PULLUP);
   pinMode(M1, INPUT_PULLUP);
   if (TREN_INT_DESCE >= 0) {
-    pinMode(TREN_INT_DESCE, INPUT_PULLUP);
+    pinMode(TREN_INT_DESCE, INPUT_PULLDOWN);
     Serial.print("[TREND] TREN_INT_DESCE(GPIO");
     Serial.print(TREN_INT_DESCE);
     Serial.println(")");
   }
   if (INT_TREND_DESCE >= 0) {
-    pinMode(INT_TREND_DESCE, INPUT_PULLUP);
+    pinMode(INT_TREND_DESCE, INPUT_PULLDOWN);
     Serial.print("[TREND] INT_TREND_DESCE(GPIO");
     Serial.print(INT_TREND_DESCE);
+    Serial.println(")");
+  }
+  if (TREN_INT_SOBE >= 0) {
+    pinMode(TREN_INT_SOBE, INPUT_PULLDOWN);
+    Serial.print("[TREND] TREN_INT_SOBE(GPIO");
+    Serial.print(TREN_INT_SOBE);
+    Serial.println(")");
+  }
+  if (INT_TREND_SOBE >= 0) {
+    pinMode(INT_TREND_SOBE, INPUT_PULLDOWN);
+    Serial.print("[TREND] INT_TREND_SOBE(GPIO");
+    Serial.print(INT_TREND_SOBE);
     Serial.println(")");
   }
   if (GAVETA >= 0) {
@@ -2137,6 +2166,178 @@ void setup() {
   bip();
 }
 
+static bool trendInputsConfigured() {
+  return TREN_INT_DESCE >= 0 || INT_TREND_DESCE >= 0 || TREN_INT_SOBE >= 0 || INT_TREND_SOBE >= 0;
+}
+
+static bool trendReadDebouncedHigh(int pin, bool& initialized, bool& raw, bool& stable, uint32_t& changedAtMs) {
+  static const uint32_t TREND_DEBOUNCE_MS = 40;
+  if (pin < 0) {
+    return false;
+  }
+  uint32_t now = millis();
+  bool cur = digitalRead(pin);
+  if (!initialized) {
+    initialized = true;
+    raw = cur;
+    stable = cur;
+    changedAtMs = now;
+    return stable == HIGH;
+  }
+  if (cur != raw) {
+    raw = cur;
+    changedAtMs = now;
+  }
+  if ((now - changedAtMs) < TREND_DEBOUNCE_MS) {
+    return stable == HIGH;
+  }
+  stable = raw;
+  return stable == HIGH;
+}
+
+static void trendDebugDump(const char* tag) {
+  bool hasUpPins = (TREN_INT_SOBE >= 0 || INT_TREND_SOBE >= 0);
+  bool mapUpRaw = false;
+  bool mapDownRaw = false;
+  if (hasUpPins) {
+    if (TREN_INT_SOBE >= 0 && digitalRead(TREN_INT_SOBE) == HIGH) mapUpRaw = true;
+    if (INT_TREND_SOBE >= 0 && digitalRead(INT_TREND_SOBE) == HIGH) mapUpRaw = true;
+  } else {
+    if (INT_TREND_DESCE >= 0 && digitalRead(INT_TREND_DESCE) == HIGH) mapUpRaw = true;
+  }
+  if (TREN_INT_DESCE >= 0 && digitalRead(TREN_INT_DESCE) == HIGH) mapDownRaw = true;
+
+  String msg = "[TREND_DBG] ";
+  msg += (tag ? tag : "DUMP");
+  msg += " GPIO_IN{";
+  msg += "TREN_D=";
+  msg += (TREN_INT_DESCE >= 0 ? String(digitalRead(TREN_INT_DESCE) == HIGH ? 1 : 0) : "NA");
+  msg += ",INT_D=";
+  msg += (INT_TREND_DESCE >= 0 ? String(digitalRead(INT_TREND_DESCE) == HIGH ? 1 : 0) : "NA");
+  msg += ",TREN_U=";
+  msg += (TREN_INT_SOBE >= 0 ? String(digitalRead(TREN_INT_SOBE) == HIGH ? 1 : 0) : "NA");
+  msg += ",INT_U=";
+  msg += (INT_TREND_SOBE >= 0 ? String(digitalRead(INT_TREND_SOBE) == HIGH ? 1 : 0) : "NA");
+  msg += "} GPIO_OUT{";
+  msg += "D=";
+  msg += (Rele_TREND_DESCE >= 0 ? String(digitalRead(Rele_TREND_DESCE) == HIGH ? 1 : 0) : "NA");
+  msg += ",U=";
+  msg += (Rele_TREND_SOBE >= 0 ? String(digitalRead(Rele_TREND_SOBE) == HIGH ? 1 : 0) : "NA");
+  msg += "} STATE{";
+  msg += "upOn=";
+  msg += (estado_trend_sobe ? "1" : "0");
+  msg += ",downOn=";
+  msg += (estado_trend_desce ? "1" : "0");
+  msg += "} MAP{";
+  msg += "U=";
+  msg += (mapUpRaw ? "1" : "0");
+  msg += ",D=";
+  msg += (mapDownRaw ? "1" : "0");
+  msg += "}";
+  Serial.println(msg);
+}
+
+static void trendDebugTick() {
+  if (!trendDebugEnabled) {
+    return;
+  }
+  uint32_t now = millis();
+  if (now < trendDebugNextMs) {
+    return;
+  }
+  trendDebugNextMs = now + trendDebugIntervalMs;
+  trendDebugDump("TICK");
+}
+
+static void trendTickInputs() {
+  if (!trendInputsConfigured()) {
+    return;
+  }
+  if (Rele_TREND_SOBE < 0 && Rele_TREND_DESCE < 0) {
+    return;
+  }
+
+  static bool init_trenUp = false, raw_trenUp = false, stable_trenUp = false;
+  static uint32_t chg_trenUp = 0;
+  static bool init_trendUp = false, raw_trendUp = false, stable_trendUp = false;
+  static uint32_t chg_trendUp = 0;
+  static bool init_trenDown = false, raw_trenDown = false, stable_trenDown = false;
+  static uint32_t chg_trenDown = 0;
+  static bool init_intDesceAsUp = false, raw_intDesceAsUp = false, stable_intDesceAsUp = false;
+  static uint32_t chg_intDesceAsUp = 0;
+
+  bool hasUpPins = (TREN_INT_SOBE >= 0 || INT_TREND_SOBE >= 0);
+  bool up = false;
+  if (hasUpPins) {
+    up = trendReadDebouncedHigh(TREN_INT_SOBE, init_trenUp, raw_trenUp, stable_trenUp, chg_trenUp) ||
+         trendReadDebouncedHigh(INT_TREND_SOBE, init_trendUp, raw_trendUp, stable_trendUp, chg_trendUp);
+  } else {
+    up = trendReadDebouncedHigh(INT_TREND_DESCE, init_intDesceAsUp, raw_intDesceAsUp, stable_intDesceAsUp, chg_intDesceAsUp);
+  }
+
+  bool down = trendReadDebouncedHigh(TREN_INT_DESCE, init_trenDown, raw_trenDown, stable_trenDown, chg_trenDown);
+
+  static bool lastConflict = false;
+  bool conflict = up && down;
+  if (conflict) {
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_IN");
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_IN");
+    estado_trend_sobe = false;
+    estado_trend_desce = false;
+    faz_bt_seg = 0;
+    paraTimerMotor();
+    if (!lastConflict) {
+      enviarBLE("TREND:CONFLICT");
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_CONFLICT", false);
+      mqttStatusDirty = true;
+    }
+    lastConflict = true;
+    return;
+  }
+  lastConflict = false;
+
+  if (up) {
+    ultimoComandoTrendSobe = millis();
+    estado_trend_sobe = true;
+    estado_trend_desce = false;
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_IN");
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, true, "TREND_IN");
+    faz_bt_seg = 1;
+    iniciaTimerMotor();
+    mqttStatusDirty = true;
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_UP_ON", false);
+    return;
+  }
+  if (down) {
+    ultimoComandoTrendDesce = millis();
+    estado_trend_desce = true;
+    estado_trend_sobe = false;
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_IN");
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, true, "TREND_IN");
+    faz_bt_seg = 1;
+    iniciaTimerMotor();
+    mqttStatusDirty = true;
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_DOWN_ON", false);
+    return;
+  }
+
+  if (estado_trend_sobe || estado_trend_desce) {
+    bool wasUp = estado_trend_sobe;
+    bool wasDown = estado_trend_desce;
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_IN");
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_IN");
+    estado_trend_sobe = false;
+    estado_trend_desce = false;
+    faz_bt_seg = 0;
+    paraTimerMotor();
+    mqttStatusDirty = true;
+    enviarBLE("TREND:OFF");
+    if (wasUp) mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_UP_OFF", false);
+    if (wasDown) mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_DOWN_OFF", false);
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_OFF", false);
+  }
+}
+
 // ========== MONITORAMENTO DE TIMEOUT DOS MOTORES (DEAD MAN'S SWITCH) ==========
 void verificaTimeoutMotores() {
   unsigned long agora = millis();
@@ -2196,7 +2397,14 @@ void verificaTimeoutMotores() {
   }
 
   // TS - Trend sobe
-  if (estado_trend_sobe && (agora - ultimoComandoTrendSobe) > MOTOR_TIMEOUT) {
+  bool tsInputActive = false;
+  if (TREN_INT_SOBE >= 0 || INT_TREND_SOBE >= 0) {
+    if (TREN_INT_SOBE >= 0 && digitalRead(TREN_INT_SOBE) == HIGH) tsInputActive = true;
+    if (INT_TREND_SOBE >= 0 && digitalRead(INT_TREND_SOBE) == HIGH) tsInputActive = true;
+  } else {
+    if (INT_TREND_DESCE >= 0 && digitalRead(INT_TREND_DESCE) == HIGH) tsInputActive = true;
+  }
+  if (estado_trend_sobe && !tsInputActive && (agora - ultimoComandoTrendSobe) > MOTOR_TIMEOUT) {
     estado_trend_sobe = false;
     if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TIMEOUT");
     faz_bt_seg = 0;
@@ -2205,7 +2413,9 @@ void verificaTimeoutMotores() {
   }
 
   // TD - Trend desce
-  if (estado_trend_desce && (agora - ultimoComandoTrendDesce) > MOTOR_TIMEOUT) {
+  bool tdInputActive = false;
+  if (TREN_INT_DESCE >= 0 && digitalRead(TREN_INT_DESCE) == HIGH) tdInputActive = true;
+  if (estado_trend_desce && !tdInputActive && (agora - ultimoComandoTrendDesce) > MOTOR_TIMEOUT) {
     estado_trend_desce = false;
     if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TIMEOUT");
     faz_bt_seg = 0;
@@ -2260,6 +2470,8 @@ void loop() {
       }
     }
   }
+  trendTickInputs();
+  trendDebugTick();
 
   // Monitoramento do sistema (Debug)
   monitoraSistema();
@@ -2980,6 +3192,73 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     }
     return;
   }
+
+  if (cmd == "TREND_TEST") {
+    if (Rele_TREND_SOBE < 0 && Rele_TREND_DESCE < 0) {
+      enviarBLE("TREND_TEST:NA");
+      return;
+    }
+    enviarBLE("TREND_TEST:START");
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_TEST", false);
+
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_TEST");
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_TEST");
+    estado_trend_sobe = false;
+    estado_trend_desce = false;
+    mqttStatusDirty = true;
+    delay(200);
+
+    if (Rele_TREND_SOBE >= 0) {
+      estado_trend_sobe = true;
+      ultimoComandoTrendSobe = millis();
+      setOutputPin(Rele_TREND_SOBE, true, "TREND_TEST");
+      mqttStatusDirty = true;
+      delay(800);
+      setOutputPin(Rele_TREND_SOBE, false, "TREND_TEST");
+      estado_trend_sobe = false;
+      mqttStatusDirty = true;
+      delay(200);
+    }
+
+    if (Rele_TREND_DESCE >= 0) {
+      estado_trend_desce = true;
+      ultimoComandoTrendDesce = millis();
+      setOutputPin(Rele_TREND_DESCE, true, "TREND_TEST");
+      mqttStatusDirty = true;
+      delay(800);
+      setOutputPin(Rele_TREND_DESCE, false, "TREND_TEST");
+      estado_trend_desce = false;
+      mqttStatusDirty = true;
+      delay(200);
+    }
+
+    enviarBLE("TREND_TEST:DONE");
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_TEST_DONE", false);
+    return;
+  }
+
+  if (cmd == "TREND_DUMP") {
+    trendDebugDump("CMD");
+    enviarBLE("TREND_DUMP:OK");
+    return;
+  }
+
+  if (cmd.startsWith("TREND_DEBUG=") || cmd.startsWith("TREND_DEBUG:")) {
+    int sep = cmd.indexOf('=');
+    if (sep < 0) sep = cmd.indexOf(':');
+    String v = cmd.substring(sep + 1);
+    v.trim();
+    v.toUpperCase();
+    if (v == "1" || v == "ON" || v == "TRUE") {
+      trendDebugEnabled = true;
+    } else if (v == "0" || v == "OFF" || v == "FALSE") {
+      trendDebugEnabled = false;
+    }
+    trendDebugNextMs = 0;
+    enviarBLE(String("TREND_DEBUG:") + (trendDebugEnabled ? "ON" : "OFF"));
+    trendDebugDump("DEBUG");
+    return;
+  }
   
   if (cmd == "WIFI_CONFIG") {
     // Inicia portal de configuraÃ§Ã£o WiFi
@@ -3155,15 +3434,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("TD:NA");
       return;
     }
-    bool limitDown = false;
-    if (TREN_INT_DESCE >= 0 && digitalRead(TREN_INT_DESCE) == LOW) limitDown = true;
-    if (INT_TREND_DESCE >= 0 && digitalRead(INT_TREND_DESCE) == LOW) limitDown = true;
-    if (limitDown) {
-      enviarBLE("TD:LIMIT");
-      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TD_LIMIT", false);
-      mqttStatusDirty = true;
-      return;
-    }
     ultimoComandoTrendDesce = millis();
     if (!estado_trend_desce) {
       estado_trend_desce = true;
@@ -3328,8 +3598,10 @@ void enviaStatusBluetooth() {
   doc["gaveta_open"] = isGavetaAbertaRaw();
   doc["trend_sobe_on"] = estado_trend_sobe;
   doc["trend_desce_on"] = estado_trend_desce;
-  if (TREN_INT_DESCE >= 0) doc["tren_int_desce"] = (digitalRead(TREN_INT_DESCE) == LOW);
-  if (INT_TREND_DESCE >= 0) doc["int_trend_desce"] = (digitalRead(INT_TREND_DESCE) == LOW);
+  if (TREN_INT_DESCE >= 0) doc["tren_int_desce"] = (digitalRead(TREN_INT_DESCE) == HIGH);
+  if (INT_TREND_DESCE >= 0) doc["int_trend_desce"] = (digitalRead(INT_TREND_DESCE) == HIGH);
+  if (TREN_INT_SOBE >= 0) doc["tren_int_sobe"] = (digitalRead(TREN_INT_SOBE) == HIGH);
+  if (INT_TREND_SOBE >= 0) doc["int_trend_sobe"] = (digitalRead(INT_TREND_SOBE) == HIGH);
   
   // Limites
   doc["se_limit"] = trava_bt_SE;
