@@ -1,5 +1,22 @@
 # ESP32 Bluetooth Chair - Cadeira Odontológica
 
+## ⚠️ AVISO DE SEGURANÇA / SECURITY WARNING
+
+**🔒 ESTE REPOSITÓRIO DEVE SER MANTIDO PRIVADO / THIS REPOSITORY MUST BE KEPT PRIVATE**
+
+Este projeto contém informações sensíveis e credenciais de API que não devem ser compartilhadas publicamente:
+- URLs e chaves API do Supabase
+- Configurações de sistema proprietário
+- Código fonte comercial
+
+**IMPORTANTE**: 
+- ✅ Mantenha este repositório como **PRIVADO** nas configurações do GitHub
+- ❌ NÃO compartilhe as credenciais com terceiros
+- ❌ NÃO faça fork público deste repositório
+- ❌ NÃO publique o código em outros lugares
+
+---
+
 ## Descrição
 
 Projeto de controle de cadeira odontológica utilizando ESP32 com:
@@ -131,14 +148,25 @@ O dispositivo aparece como **"CadeiraOdonto-XXXX"** no pareamento (XXXX = últim
 
 ## Configuração Supabase
 
+⚠️ **ATENÇÃO: CREDENCIAIS SENSÍVEIS**
+
 O número de série é gerado automaticamente a partir do MAC ID do ESP32.
 
-Edite apenas as credenciais do Supabase no arquivo `main.cpp`:
+### 🔐 Configurando Credenciais (PRIVADAS)
+
+As credenciais do Supabase estão no arquivo `src/main.cpp`:
 
 ```cpp
 const char* SUPABASE_URL = "https://seu-projeto.supabase.co";
 const char* SUPABASE_KEY = "sua-chave-api";
 ```
+
+**IMPORTANTE:**
+- ⚠️ Estas credenciais são **PRIVADAS** e não devem ser compartilhadas
+- ⚠️ Mantenha o repositório **PRIVADO** para proteger estas informações
+- ⚠️ Não faça commit de credenciais de produção em repositórios públicos
+- ✅ Use credenciais de desenvolvimento para testes
+- ✅ Considere usar variáveis de ambiente para produção
 
 ## Integração Flutter
 
