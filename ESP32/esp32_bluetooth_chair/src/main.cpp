@@ -1912,16 +1912,20 @@ static uint32_t last_pulses_assento = 0;
 static uint32_t last_pulses_perneira = 0;
 static uint32_t last_pulses_trend = 0;
 static uint32_t trendLastPulseAtMs = 0;
+static uint32_t last_pulses_trend_travel = 0;
 
 static uint64_t motorTravelPulsesEncosto = 0;
 static uint64_t motorTravelPulsesAssento = 0;
 static uint64_t motorTravelPulsesPerneira = 0;
+static uint64_t motorTravelPulsesTrend = 0;
 static uint64_t motorTravelUnsavedEncosto = 0;
 static uint64_t motorTravelUnsavedAssento = 0;
 static uint64_t motorTravelUnsavedPerneira = 0;
+static uint64_t motorTravelUnsavedTrend = 0;
 static float mmPerPulseEncosto = 0.01f;
 static float mmPerPulseAssento = 0.01f;
 static float mmPerPulsePerneira = 0.01f;
+static float mmPerPulseTrend = 0.01f;
 static uint32_t motorTravelNextSaveMs = 0;
 static uint32_t motorTravelNextSendMs = 0;
 static const uint32_t MOTOR_TRAVEL_SAVE_INTERVAL_MS = 10000;
@@ -3677,27 +3681,34 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     double enc_m = (static_cast<double>(motorTravelPulsesEncosto) * mmPerPulseEncosto) / 1000.0;
     double ass_m = (static_cast<double>(motorTravelPulsesAssento) * mmPerPulseAssento) / 1000.0;
     double per_m = (static_cast<double>(motorTravelPulsesPerneira) * mmPerPulsePerneira) / 1000.0;
+    double tre_m = (static_cast<double>(motorTravelPulsesTrend) * mmPerPulseTrend) / 1000.0;
     Serial.print("[TRAVEL] PULSOS ENC=");
     Serial.print(static_cast<uint32_t>(motorTravelPulsesEncosto));
     Serial.print(" ASS=");
     Serial.print(static_cast<uint32_t>(motorTravelPulsesAssento));
     Serial.print(" PER=");
     Serial.println(static_cast<uint32_t>(motorTravelPulsesPerneira));
+    Serial.print("[TRAVEL] PULSOS TREND=");
+    Serial.println(static_cast<uint32_t>(motorTravelPulsesTrend));
     Serial.print("[TRAVEL] METROS ENC=");
     Serial.print(enc_m, 3);
     Serial.print(" ASS=");
     Serial.print(ass_m, 3);
     Serial.print(" PER=");
-    Serial.println(per_m, 3);
+    Serial.print(per_m, 3);
+    Serial.print(" TRE=");
+    Serial.println(tre_m, 3);
     enviarBLE("TRAVEL:OK");
   }
   else if (cmd == "TRAVEL_RESET") {
     motorTravelPulsesEncosto = 0;
     motorTravelPulsesAssento = 0;
     motorTravelPulsesPerneira = 0;
+    motorTravelPulsesTrend = 0;
     motorTravelUnsavedEncosto = 0;
     motorTravelUnsavedAssento = 0;
     motorTravelUnsavedPerneira = 0;
+    motorTravelUnsavedTrend = 0;
     saveMotorTravelPreferences(true);
     supabaseLogUsage("TRAVEL_RESET");
     enviarBLE("TRAVEL:RESET");
@@ -3731,6 +3742,13 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     mmPerPulsePerneira = cmd.substring(sep + 1).toFloat();
     saveMotorTravelPreferences(true);
     enviarBLE("MM_PER_PULSE_PER:OK");
+  }
+  else if (cmd.startsWith("MM_PER_PULSE_TREND=") || cmd.startsWith("MM_PER_PULSE_TREND:")) {
+    int sep = cmd.indexOf('=');
+    if (sep < 0) sep = cmd.indexOf(':');
+    mmPerPulseTrend = cmd.substring(sep + 1).toFloat();
+    saveMotorTravelPreferences(true);
+    enviarBLE("MM_PER_PULSE_TREND:OK");
   }
   else if (cmd == "ENC_DEBUG_ON") {
     encoderPulseDebug = true;
@@ -4072,28 +4090,34 @@ static void loadMotorTravelPreferences() {
   motorTravelPulsesEncosto = p.getULong64("p_enc", 0);
   motorTravelPulsesAssento = p.getULong64("p_ass", 0);
   motorTravelPulsesPerneira = p.getULong64("p_per", 0);
+  motorTravelPulsesTrend = p.getULong64("p_trend", 0);
   mmPerPulseEncosto = p.getFloat("mm_enc", mmPerPulseEncosto);
   mmPerPulseAssento = p.getFloat("mm_ass", mmPerPulseAssento);
   mmPerPulsePerneira = p.getFloat("mm_per", mmPerPulsePerneira);
+  mmPerPulseTrend = p.getFloat("mm_trend", mmPerPulseTrend);
   p.end();
   Serial.print("[TRAVEL] PULSOS ENC=");
   Serial.print(static_cast<uint32_t>(motorTravelPulsesEncosto));
   Serial.print(" ASS=");
   Serial.print(static_cast<uint32_t>(motorTravelPulsesAssento));
   Serial.print(" PER=");
-  Serial.println(static_cast<uint32_t>(motorTravelPulsesPerneira));
+  Serial.print(static_cast<uint32_t>(motorTravelPulsesPerneira));
+  Serial.print(" TREND=");
+  Serial.println(static_cast<uint32_t>(motorTravelPulsesTrend));
   Serial.print("[TRAVEL] MM_PER_PULSE ENC=");
   Serial.print(mmPerPulseEncosto, 6);
   Serial.print(" ASS=");
   Serial.print(mmPerPulseAssento, 6);
   Serial.print(" PER=");
-  Serial.println(mmPerPulsePerneira, 6);
+  Serial.print(mmPerPulsePerneira, 6);
+  Serial.print(" TREND=");
+  Serial.println(mmPerPulseTrend, 6);
 }
 
 static void saveMotorTravelPreferences(bool force) {
   uint32_t now = millis();
   if (!force) {
-    if (motorTravelUnsavedEncosto == 0 && motorTravelUnsavedAssento == 0 && motorTravelUnsavedPerneira == 0) {
+    if (motorTravelUnsavedEncosto == 0 && motorTravelUnsavedAssento == 0 && motorTravelUnsavedPerneira == 0 && motorTravelUnsavedTrend == 0) {
       return;
     }
     if (static_cast<int32_t>(now - motorTravelNextSaveMs) < 0) {
@@ -4109,13 +4133,16 @@ static void saveMotorTravelPreferences(bool force) {
   p.putULong64("p_enc", motorTravelPulsesEncosto);
   p.putULong64("p_ass", motorTravelPulsesAssento);
   p.putULong64("p_per", motorTravelPulsesPerneira);
+  p.putULong64("p_trend", motorTravelPulsesTrend);
   p.putFloat("mm_enc", mmPerPulseEncosto);
   p.putFloat("mm_ass", mmPerPulseAssento);
   p.putFloat("mm_per", mmPerPulsePerneira);
+  p.putFloat("mm_trend", mmPerPulseTrend);
   p.end();
   motorTravelUnsavedEncosto = 0;
   motorTravelUnsavedAssento = 0;
   motorTravelUnsavedPerneira = 0;
+  motorTravelUnsavedTrend = 0;
   motorTravelNextSaveMs = now + MOTOR_TRAVEL_SAVE_INTERVAL_MS;
 }
 
@@ -4126,18 +4153,22 @@ static bool supabaseUpsertMotorTravel() {
   double enc_m = (static_cast<double>(motorTravelPulsesEncosto) * mmPerPulseEncosto) / 1000.0;
   double ass_m = (static_cast<double>(motorTravelPulsesAssento) * mmPerPulseAssento) / 1000.0;
   double per_m = (static_cast<double>(motorTravelPulsesPerneira) * mmPerPulsePerneira) / 1000.0;
+  double tre_m = (static_cast<double>(motorTravelPulsesTrend) * mmPerPulseTrend) / 1000.0;
 
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<640> doc;
   doc["chair_serial"] = NUMERO_SERIE_CADEIRA;
   doc["encosto_pulses"] = static_cast<double>(motorTravelPulsesEncosto);
   doc["assento_pulses"] = static_cast<double>(motorTravelPulsesAssento);
   doc["perneira_pulses"] = static_cast<double>(motorTravelPulsesPerneira);
+  doc["trend_pulses"] = static_cast<double>(motorTravelPulsesTrend);
   doc["encosto_m"] = enc_m;
   doc["assento_m"] = ass_m;
   doc["perneira_m"] = per_m;
+  doc["trend_m"] = tre_m;
   doc["mm_per_pulse_encosto"] = mmPerPulseEncosto;
   doc["mm_per_pulse_assento"] = mmPerPulseAssento;
   doc["mm_per_pulse_perneira"] = mmPerPulsePerneira;
+  doc["mm_per_pulse_trend"] = mmPerPulseTrend;
   doc["updated_at"] = getTimestamp();
 
   String payload;
@@ -4634,9 +4665,11 @@ void contagem_tempo_incoder_virtual() {
   uint32_t d_encosto = pulses_encosto - last_pulses_encosto;
   uint32_t d_asento = pulses_assento - last_pulses_assento;
   uint32_t d_perneira = pulses_perneira - last_pulses_perneira;
+  uint32_t d_trend = pulses_trend - last_pulses_trend_travel;
   last_pulses_encosto = pulses_encosto;
   last_pulses_assento = pulses_assento;
   last_pulses_perneira = pulses_perneira;
+  last_pulses_trend_travel = pulses_trend;
 
   if (d_encosto) {
     motorTravelPulsesEncosto += d_encosto;
@@ -4650,19 +4683,27 @@ void contagem_tempo_incoder_virtual() {
     motorTravelPulsesPerneira += d_perneira;
     motorTravelUnsavedPerneira += d_perneira;
   }
-  if (encoderPulseDebug && (d_encosto || d_asento || d_perneira)) {
+  if (d_trend) {
+    motorTravelPulsesTrend += d_trend;
+    motorTravelUnsavedTrend += d_trend;
+  }
+  if (encoderPulseDebug && (d_encosto || d_asento || d_perneira || d_trend)) {
     Serial.print("[ENC_PULSE] dENC=");
     Serial.print(d_encosto);
     Serial.print(" dASS=");
     Serial.print(d_asento);
     Serial.print(" dPER=");
     Serial.print(d_perneira);
+    Serial.print(" dTRE=");
+    Serial.print(d_trend);
     Serial.print(" | PENC=");
     Serial.print(static_cast<uint32_t>(pulses_encosto));
     Serial.print(" PASS=");
     Serial.print(static_cast<uint32_t>(pulses_assento));
     Serial.print(" PPER=");
-    Serial.println(static_cast<uint32_t>(pulses_perneira));
+    Serial.print(static_cast<uint32_t>(pulses_perneira));
+    Serial.print(" PTRE=");
+    Serial.println(static_cast<uint32_t>(pulses_trend));
   }
   saveMotorTravelPreferences(false);
 
