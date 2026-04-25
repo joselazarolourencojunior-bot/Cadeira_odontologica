@@ -23,6 +23,7 @@
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <Wire.h>
+#include <new>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -507,10 +508,10 @@ const char* SENHA_AP = "12345678";                  // Senha da rede de configur
 // ============================================
 
 static String mqttHost = "test.mosquitto.org";
-static uint16_t mqttPort = 1883;
+static uint16_t mqttPort = 8883;
 static String mqttUser = "";
 static String mqttPass = "";
-static bool mqttUseTls = false;
+static bool mqttUseTls = true;
 static String mqttClientId = "";
 static bool mqttCleanSession = true;
 static uint32_t mqttRxCount = 0;
@@ -559,14 +560,32 @@ static inline void mqttUnlock() {
 }
 
 WiFiClient mqttPlainClient;
-WiFiClientSecure mqttSecureClient;
+static WiFiClientSecure* mqttSecureClientPtr = nullptr;
 PubSubClient mqttClient(mqttPlainClient);
+
+static inline WiFiClientSecure& mqttSecureClientRef() {
+  if (!mqttSecureClientPtr) {
+    mqttSecureClientPtr = new WiFiClientSecure();
+  }
+  return *mqttSecureClientPtr;
+}
+
+static inline void resetMqttSecureClient() {
+  if (mqttSecureClientPtr) {
+    delete mqttSecureClientPtr;
+    mqttSecureClientPtr = nullptr;
+  }
+  mqttSecureClientPtr = new WiFiClientSecure();
+}
 static bool beepNetMqttOkDone = false;
 static bool beepMqttErrorDone = false;
 static bool beepSupabaseOkDone = false;
 static uint32_t beepSupabaseErrorNextMs = 0;
 static uint32_t mqttReadyAtMs = 0;
 static bool mqttConnectEnabled = false;
+static bool mqttPostConnectPending = false;
+static bool mqttSubscribed = false;
+static uint32_t mqttPostConnectUntilMs = 0;
 static bool audibleErrorBeeps = true;
 static uint32_t bootStartedAtMs = 0;
 static uint32_t wifiOkAtMs = 0;
@@ -769,13 +788,13 @@ static bool mqttEnqueuePublish(const String& topic, const String& payload, bool 
 
 static void otaLoadPreferences() {
   Preferences p;
-  if (!p.begin("ota", true)) {
+  if (!p.begin("ota", false)) {
     return;
   }
-  otaEnabled = p.getBool("enabled", false);
-  otaManifestUrl = p.getString("manifest", "");
-  otaIntervalSec = p.getUInt("interval", 21600);
-  otaPendingVersion = p.getString("pending", "");
+  otaEnabled = p.isKey("enabled") ? p.getBool("enabled", false) : false;
+  otaManifestUrl = p.isKey("manifest") ? p.getString("manifest", "") : "";
+  otaIntervalSec = p.isKey("interval") ? p.getUInt("interval", 21600) : 21600;
+  otaPendingVersion = p.isKey("pending") ? p.getString("pending", "") : "";
   p.end();
 }
 
@@ -1109,9 +1128,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
+static void saveMqttPreferences();
+static bool tlsHandshakeOnce(const String& host, uint16_t port);
+static bool mqttRawConnackOnce(const String& host, uint16_t port, const String& clientId);
+
 void reconnectMQTT() {
   if (!mqttClient.connected()) {
     static uint32_t mqttNextAttemptMs = 0;
+    static uint8_t mqttNetFailStreak = 0;
+    static uint8_t mqttTlsFailStreak = 0;
     uint32_t now = millis();
     if (static_cast<int32_t>(now - mqttNextAttemptMs) < 0) {
       return;
@@ -1129,6 +1154,44 @@ void reconnectMQTT() {
       return;
     }
 
+    if (mqttUseTls) {
+      resetMqttSecureClient();
+      WiFiClientSecure& sc = mqttSecureClientRef();
+      sc.stop();
+      sc.setHandshakeTimeout(15);
+      sc.setTimeout(20);
+      sc.setInsecure();
+      mqttClient.setClient(sc);
+    } else {
+      mqttClient.setClient(mqttPlainClient);
+    }
+    mqttClient.setSocketTimeout(5);
+    mqttClient.setKeepAlive(30);
+
+    mqttClient.setServer(mqttHost.c_str(), mqttPort);
+    if (WiFi.status() == WL_CONNECTED) {
+      IPAddress ip;
+      if (WiFi.hostByName(mqttHost.c_str(), ip) == 1) {
+        Serial.print("ip=");
+        Serial.print(ip);
+        Serial.print(" port=");
+        Serial.print(mqttPort);
+        Serial.print(" tls=");
+        Serial.print(mqttUseTls ? "1" : "0");
+        Serial.print(" clean=");
+        Serial.println(mqttCleanSession ? "1" : "0");
+      } else {
+        Serial.print("dns_fail host=");
+        Serial.print(mqttHost);
+        Serial.print(" port=");
+        Serial.print(mqttPort);
+        Serial.print(" tls=");
+        Serial.print(mqttUseTls ? "1" : "0");
+        Serial.print(" clean=");
+        Serial.println(mqttCleanSession ? "1" : "0");
+      }
+    }
+
     if (mqttUser.length() > 0 && mqttPass.length() == 0) {
       Serial.println("falhou, senha vazia (use MQTT_PASS=...)");
       mqttUnlock();
@@ -1140,13 +1203,10 @@ void reconnectMQTT() {
     if (mqttUser.length() == 0 && mqttPass.length() == 0) {
       ok = mqttClient.connect(
         clientId.c_str(),
-        "",
-        "",
         willTopic.c_str(),
         1,
         true,
-        "offline",
-        mqttCleanSession
+        "offline"
       );
     } else if (mqttUser.length() > 0) {
       ok = mqttClient.connect(
@@ -1159,50 +1219,219 @@ void reconnectMQTT() {
         "offline",
         mqttCleanSession
       );
-    } else {
-      Serial.println("falhou, usuario vazio");
-      mqttUnlock();
-      mqttNextAttemptMs = now + 5000;
-      return;
     }
     if (ok) {
       Serial.println("conectado!");
       beepMqttErrorDone = false;
       mqttOkAtMs = millis();
       mqttLostAtMs = 0;
-      
-      // Inscreve-se no tópico de comandos
-      String commandTopic = MQTT_TOPIC_BASE + "command";
-      mqttClient.subscribe(commandTopic.c_str(), 0);
-      Serial.print("[MQTT] Inscrito no tópico: ");
-      Serial.println(commandTopic);
-
-      mqttClient.publish(willTopic.c_str(), "online", true);
-      mqttTxCount++;
-      mqttLastTxMs = millis();
-
-      publicaStatusMQTT();
-
+      mqttNetFailStreak = 0;
+      mqttTlsFailStreak = 0;
+      mqttPostConnectPending = true;
+      mqttSubscribed = false;
+      mqttPostConnectUntilMs = millis() + 5000;
       mqttUnlock();
-
-      // Não publica status inicial
-      if (!beepNetMqttOkDone && WiFi.status() == WL_CONNECTED) {
-        bip(); delay(120);
-        bip(); delay(120);
-        bip();
-        Serial.println("[BUZZER] WiFi+MQTT OK");
-        beepNetMqttOkDone = true;
-        supabaseLogUsage("MQTT_CONNECTED");
-      }
       
     } else {
       Serial.print("falhou, rc=");
-      Serial.print(mqttClient.state());
+      int st = mqttClient.state();
+      Serial.print(st);
       Serial.println(" tentando novamente em 5 segundos");
       mqttUnlock();
+      if (mqttUseTls) {
+        Serial.print("[MQTT_TLS] connect_fail port=");
+        Serial.print(mqttPort);
+        Serial.print(" fd=");
+        Serial.println(mqttSecureClientPtr ? mqttSecureClientPtr->fd() : -1);
+        char errBuf[160];
+        memset(errBuf, 0, sizeof(errBuf));
+        int errCode = mqttSecureClientPtr ? mqttSecureClientPtr->lastError(errBuf, sizeof(errBuf)) : 0;
+        Serial.print("[MQTT_TLS] lastError=");
+        Serial.print(errCode);
+        Serial.print(" msg=");
+        Serial.println(errBuf);
+        static uint32_t mqttDiagNextMs = 0;
+        if (static_cast<int32_t>(now - mqttDiagNextMs) >= 0) {
+          mqttDiagNextMs = now + 30000;
+          bool tlsOk = tlsHandshakeOnce(mqttHost, mqttPort);
+          if (tlsOk) {
+            String cid = mqttClientId.length() > 0 ? mqttClientId : ("ESP32-" + NUMERO_SERIE_CADEIRA);
+            bool connackOk = mqttRawConnackOnce(mqttHost, mqttPort, cid);
+            if (!connackOk && mqttHost == "test.mosquitto.org") {
+              mqttHost = "broker.emqx.io";
+              Serial.println("[MQTT] Broker TLS test.mosquitto.org sem CONNACK. Alternando para broker.emqx.io");
+              saveMqttPreferences();
+              mqttNextAttemptMs = now + 1000;
+              return;
+            }
+          }
+        }
+      }
+      if (st == -2) {
+        if (mqttNetFailStreak < 255) mqttNetFailStreak++;
+        if (!mqttUseTls && mqttPort == 1883 && mqttNetFailStreak >= 1) {
+          mqttUseTls = true;
+          mqttPort = 8883;
+          mqttTlsFailStreak = 0;
+          Serial.println("[MQTT] Alternando para TLS (8883) por falha persistente em 1883");
+          saveMqttPreferences();
+          mqttNextAttemptMs = now + 1000;
+          return;
+        }
+      } else {
+        mqttNetFailStreak = 0;
+      }
+      if (mqttUseTls) {
+        if (mqttTlsFailStreak < 255) mqttTlsFailStreak++;
+        if (mqttTlsFailStreak >= 2) {
+          mqttTlsFailStreak = 0;
+          if (mqttPort != 8883) {
+            mqttPort = 8883;
+            Serial.println("[MQTT] Alternando TLS para porta 8883 por falha persistente");
+            saveMqttPreferences();
+            mqttNextAttemptMs = now + 1000;
+            return;
+          }
+        }
+      } else {
+        mqttTlsFailStreak = 0;
+      }
       mqttNextAttemptMs = now + 5000;
     }
   }
+}
+
+static bool tlsHandshakeOnce(const String& host, uint16_t port) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[TLS_TEST] WiFi desconectado");
+    return false;
+  }
+  WiFiClientSecure client;
+  client.stop();
+  client.setHandshakeTimeout(15);
+  client.setTimeout(20);
+  client.setInsecure();
+  uint32_t t0 = millis();
+  bool ok = client.connect(host.c_str(), port);
+  uint32_t dt = millis() - t0;
+  Serial.print("[TLS_TEST] host=");
+  Serial.print(host);
+  Serial.print(" port=");
+  Serial.print(port);
+  Serial.print(" ok=");
+  Serial.print(ok ? "1" : "0");
+  Serial.print(" ms=");
+  Serial.print(dt);
+  Serial.print(" fd=");
+  Serial.println(client.fd());
+  client.stop();
+  return ok;
+}
+
+static bool mqttRawConnackOnce(const String& host, uint16_t port, const String& clientId) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[MQTT_RAW] WiFi desconectado");
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.stop();
+  client.setHandshakeTimeout(15);
+  client.setTimeout(20);
+  client.setInsecure();
+
+  uint32_t t0 = millis();
+  bool ok = client.connect(host.c_str(), port);
+  uint32_t tlsMs = millis() - t0;
+
+  Serial.print("[MQTT_RAW] tls host=");
+  Serial.print(host);
+  Serial.print(" port=");
+  Serial.print(port);
+  Serial.print(" ok=");
+  Serial.print(ok ? "1" : "0");
+  Serial.print(" ms=");
+  Serial.print(tlsMs);
+  Serial.print(" fd=");
+  Serial.println(client.fd());
+
+  if (!ok) {
+    client.stop();
+    return false;
+  }
+
+  uint8_t pkt[256];
+  size_t cidLen = static_cast<size_t>(clientId.length());
+  if (cidLen == 0 || cidLen > 200) {
+    client.stop();
+    return false;
+  }
+
+  size_t vhLen = 10;
+  size_t payloadLen = 2 + cidLen;
+  size_t remLen = vhLen + payloadLen;
+  if (remLen > 127) {
+    client.stop();
+    return false;
+  }
+
+  size_t i = 0;
+  pkt[i++] = 0x10;
+  pkt[i++] = static_cast<uint8_t>(remLen);
+  pkt[i++] = 0x00; pkt[i++] = 0x04;
+  pkt[i++] = 'M'; pkt[i++] = 'Q'; pkt[i++] = 'T'; pkt[i++] = 'T';
+  pkt[i++] = 0x04;
+  pkt[i++] = 0x02;
+  pkt[i++] = 0x00; pkt[i++] = 60;
+  pkt[i++] = static_cast<uint8_t>((cidLen >> 8) & 0xFF);
+  pkt[i++] = static_cast<uint8_t>(cidLen & 0xFF);
+  for (size_t k = 0; k < cidLen; k++) {
+    pkt[i++] = static_cast<uint8_t>(clientId[k]);
+  }
+
+  uint32_t t1 = millis();
+  int wr = client.write(pkt, i);
+  client.flush();
+  uint32_t wrMs = millis() - t1;
+  Serial.print("[MQTT_RAW] write bytes=");
+  Serial.print(i);
+  Serial.print(" wr=");
+  Serial.print(wr);
+  Serial.print(" ms=");
+  Serial.println(wrMs);
+
+  uint8_t resp[4];
+  uint32_t deadline = millis() + 3000;
+  size_t got = 0;
+  while (static_cast<int32_t>(millis() - deadline) < 0 && got < sizeof(resp)) {
+    if (!client.connected()) {
+      break;
+    }
+    int av = client.available();
+    if (av <= 0) {
+      delay(10);
+      continue;
+    }
+    int r = client.read(resp + got, sizeof(resp) - got);
+    if (r > 0) got += static_cast<size_t>(r);
+    else break;
+  }
+
+  Serial.print("[MQTT_RAW] resp_len=");
+  Serial.println(got);
+  Serial.print("[MQTT_RAW] connected=");
+  Serial.println(client.connected() ? "1" : "0");
+  if (got == 4) {
+    Serial.print("[MQTT_RAW] resp=");
+    Serial.print(resp[0], HEX); Serial.print(" ");
+    Serial.print(resp[1], HEX); Serial.print(" ");
+    Serial.print(resp[2], HEX); Serial.print(" ");
+    Serial.println(resp[3], HEX);
+  }
+
+  bool connackOk = (got == 4 && resp[0] == 0x20 && resp[1] == 0x02 && resp[2] == 0x00 && resp[3] == 0x00);
+  client.stop();
+  return connackOk;
 }
 
 static void mqttTaskMain(void* pvParameters) {
@@ -1229,6 +1458,43 @@ static void mqttTaskMain(void* pvParameters) {
       }
       reconnectMQTT();
       if (mqttClient.connected()) {
+        if (mqttPostConnectPending && mqttPostConnectUntilMs != 0 && static_cast<int32_t>(now - mqttPostConnectUntilMs) >= 0) {
+          mqttPostConnectPending = false;
+          mqttPostConnectUntilMs = 0;
+        }
+        if (mqttPostConnectPending) {
+          if (mqttLockMs(250)) {
+            if (!mqttSubscribed) {
+              mqttClient.setSocketTimeout(5);
+              String commandTopic = MQTT_TOPIC_BASE + "command";
+              bool subOk = mqttClient.subscribe(commandTopic.c_str(), 0);
+              mqttSubscribed = subOk;
+              Serial.print("[MQTT] Subscribe command ");
+              Serial.print(subOk ? "OK " : "FAIL ");
+              Serial.println(commandTopic);
+            }
+            if (mqttSubscribed) {
+              String willTopic = MQTT_TOPIC_BASE + "lwt";
+              bool pubOk = mqttClient.publish(willTopic.c_str(), "online", true);
+              mqttTxCount++;
+              mqttLastTxMs = millis();
+              Serial.print("[MQTT] LWT online ");
+              Serial.println(pubOk ? "OK" : "FAIL");
+              publicaStatusMQTT();
+              if (!beepNetMqttOkDone && WiFi.status() == WL_CONNECTED) {
+                bip(); delay(120);
+                bip(); delay(120);
+                bip();
+                Serial.println("[BUZZER] WiFi+MQTT OK");
+                beepNetMqttOkDone = true;
+                supabaseLogUsage("MQTT_CONNECTED");
+              }
+              mqttPostConnectPending = false;
+              mqttPostConnectUntilMs = 0;
+            }
+            mqttUnlock();
+          }
+        }
         if (mqttLockMs(50)) {
           mqttClient.loop();
           if (mqttTxQueue) {
@@ -1253,6 +1519,9 @@ static void mqttTaskMain(void* pvParameters) {
       }
     } else {
       beepNetMqttOkDone = false;
+      mqttPostConnectPending = false;
+      mqttSubscribed = false;
+      mqttPostConnectUntilMs = 0;
       if (mqttClient.connected()) {
         if (mqttLockMs(50)) {
           mqttClient.disconnect();
@@ -1570,9 +1839,12 @@ static void saveMqttPreferences() {
 }
 
 static void applyMqttRuntimeConfig() {
-  bool locked = mqttLockMs(200);
-  if (!locked) {
-    return;
+  bool locked = false;
+  if (mqttMutex) {
+    locked = mqttLockMs(200);
+    if (!locked) {
+      return;
+    }
   }
   if (mqttUseTls && mqttPort == 1883) {
     mqttPort = 8883;
@@ -1580,8 +1852,8 @@ static void applyMqttRuntimeConfig() {
     mqttPort = 1883;
   }
   if (mqttUseTls) {
-    mqttSecureClient.setInsecure();
-    mqttClient.setClient(mqttSecureClient);
+    mqttSecureClientRef().setInsecure();
+    mqttClient.setClient(mqttSecureClientRef());
   } else {
     mqttClient.setClient(mqttPlainClient);
   }
@@ -1589,12 +1861,12 @@ static void applyMqttRuntimeConfig() {
     IPAddress ip;
     if (WiFi.hostByName(mqttHost.c_str(), ip) == 1) {
       mqttClient.setServer(ip, mqttPort);
-      mqttUnlock();
+      if (locked) mqttUnlock();
       return;
     }
   }
   mqttClient.setServer(mqttHost.c_str(), mqttPort);
-  mqttUnlock();
+  if (locked) mqttUnlock();
 }
 
 // Constantes - Pinos de SAÃDA (relÃ©s e indicadores)
@@ -2251,7 +2523,7 @@ void setup() {
     mqttTxQueue = xQueueCreate(8, sizeof(MqttTxItem));
   }
   if (!mqttTaskHandle) {
-    xTaskCreatePinnedToCore(mqttTaskMain, "mqtt", 12288, NULL, 0, &mqttTaskHandle, 0);
+    xTaskCreatePinnedToCore(mqttTaskMain, "mqtt", 24576, NULL, 1, &mqttTaskHandle, 1);
   }
   otaValidateAfterBoot();
 
@@ -2262,6 +2534,14 @@ void setup() {
   // Sincroniza horário com servidor NTP
   if (WiFi.status() == WL_CONNECTED) {
     sincronizaNTP();
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    uint32_t waitUntil = millis() + 12000;
+    while (!mqttClient.connected() && static_cast<int32_t>(millis() - waitUntil) < 0) {
+      reconnectMQTT();
+      delay(200);
+    }
   }
 
   Serial.println("\n====================================");
@@ -2289,11 +2569,6 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     mqttConnectEnabled = true;
     mqttReadyAtMs = millis() + 1000;
-    uint32_t waitUntil = millis() + 15000;
-    while (!mqttClient.connected() && static_cast<int32_t>(millis() - waitUntil) < 0) {
-      reconnectMQTT();
-      delay(50);
-    }
   }
 
   Serial.println("\n====================================");
@@ -3176,10 +3451,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       return;
     }
     mqttHost = "test.mosquitto.org";
-    mqttPort = 1883;
+    mqttPort = 8883;
     mqttUser = "";
     mqttPass = "";
-    mqttUseTls = false;
+    mqttUseTls = true;
     mqttClientId = "";
     mqttCleanSession = true;
     Preferences p;
@@ -3192,6 +3467,37 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     mqttUnlock();
     beepNetMqttOkDone = false;
     enviarBLE("MQTT_RESET:OK");
+    return;
+  }
+
+  if (cmd == "TLS_TEST") {
+    Serial.println("====================================");
+    Serial.println("             TLS_TEST               ");
+    Serial.println("====================================");
+    bool ok8883 = tlsHandshakeOnce(mqttHost, 8883);
+    bool ok8886 = tlsHandshakeOnce(mqttHost, 8886);
+    bool okCurrent = tlsHandshakeOnce(mqttHost, mqttPort);
+    enviarBLE(String("TLS_TEST:HOST:") + mqttHost + ":8883:" + (ok8883 ? "OK" : "FAIL") + ":8886:" + (ok8886 ? "OK" : "FAIL") + ":CUR:" + String(mqttPort) + ":" + (okCurrent ? "OK" : "FAIL"));
+    return;
+  }
+
+  if (cmd == "MQTT_RAW_TEST") {
+    Serial.println("====================================");
+    Serial.println("           MQTT_RAW_TEST            ");
+    Serial.println("====================================");
+    bool prevEnabled = mqttConnectEnabled;
+    mqttConnectEnabled = false;
+    if (mqttLockMs(200)) {
+      mqttClient.disconnect();
+      mqttUnlock();
+    }
+    delay(200);
+    String cid = mqttClientId.length() > 0 ? mqttClientId : ("ESP32-" + NUMERO_SERIE_CADEIRA);
+    bool ok8883 = mqttRawConnackOnce(mqttHost, 8883, cid);
+    bool ok8886 = mqttRawConnackOnce(mqttHost, 8886, cid);
+    bool okCurrent = mqttRawConnackOnce(mqttHost, mqttPort, cid);
+    mqttConnectEnabled = prevEnabled;
+    enviarBLE(String("MQTT_RAW_TEST:HOST:") + mqttHost + ":8883:" + (ok8883 ? "OK" : "FAIL") + ":8886:" + (ok8886 ? "OK" : "FAIL") + ":CUR:" + String(mqttPort) + ":" + (okCurrent ? "OK" : "FAIL"));
     return;
   }
 
@@ -3842,7 +4148,7 @@ void salvaHorimetro() {
 }
 
 void carregaHorimetro() {
-  preferences.begin("horimetro", true);
+  preferences.begin("horimetro", false);
   horimetro = preferences.getFloat("hours", 0);
   totalMillisMotor = preferences.getULong("millis", 0);
   preferences.end();
@@ -4084,17 +4390,17 @@ static bool supabaseGetJson(const String& restPath, String& responseOut) {
 
 static void loadMotorTravelPreferences() {
   Preferences p;
-  if (!p.begin("motor_travel", true)) {
+  if (!p.begin("motor_travel", false)) {
     return;
   }
-  motorTravelPulsesEncosto = p.getULong64("p_enc", 0);
-  motorTravelPulsesAssento = p.getULong64("p_ass", 0);
-  motorTravelPulsesPerneira = p.getULong64("p_per", 0);
-  motorTravelPulsesTrend = p.getULong64("p_trend", 0);
-  mmPerPulseEncosto = p.getFloat("mm_enc", mmPerPulseEncosto);
-  mmPerPulseAssento = p.getFloat("mm_ass", mmPerPulseAssento);
-  mmPerPulsePerneira = p.getFloat("mm_per", mmPerPulsePerneira);
-  mmPerPulseTrend = p.getFloat("mm_trend", mmPerPulseTrend);
+  motorTravelPulsesEncosto = p.isKey("p_enc") ? p.getULong64("p_enc", 0) : 0;
+  motorTravelPulsesAssento = p.isKey("p_ass") ? p.getULong64("p_ass", 0) : 0;
+  motorTravelPulsesPerneira = p.isKey("p_per") ? p.getULong64("p_per", 0) : 0;
+  motorTravelPulsesTrend = p.isKey("p_trend") ? p.getULong64("p_trend", 0) : 0;
+  mmPerPulseEncosto = p.isKey("mm_enc") ? p.getFloat("mm_enc", mmPerPulseEncosto) : mmPerPulseEncosto;
+  mmPerPulseAssento = p.isKey("mm_ass") ? p.getFloat("mm_ass", mmPerPulseAssento) : mmPerPulseAssento;
+  mmPerPulsePerneira = p.isKey("mm_per") ? p.getFloat("mm_per", mmPerPulsePerneira) : mmPerPulsePerneira;
+  mmPerPulseTrend = p.isKey("mm_trend") ? p.getFloat("mm_trend", mmPerPulseTrend) : mmPerPulseTrend;
   p.end();
   Serial.print("[TRAVEL] PULSOS ENC=");
   Serial.print(static_cast<uint32_t>(motorTravelPulsesEncosto));
@@ -4189,7 +4495,7 @@ static bool supabaseUpsertMotorTravel() {
   }
   http.addHeader("Prefer", "resolution=merge-duplicates,return=minimal");
   int httpCode = http.POST(payload);
-  bool ok = (httpCode == 201 || httpCode == 204);
+  bool ok = (httpCode == 200 || httpCode == 201 || httpCode == 204);
   if (!ok && httpCode > 0) {
     Serial.print("[ERRO] MotorTravel ");
     Serial.print(httpCode);
@@ -4261,7 +4567,7 @@ static bool supabaseLoadMemoryPositionFromDb(int slot) {
   preferences.putInt("encoder_asento", incoder_virtual_asento_M1);
   preferences.end();
 
-  preferences.begin("encoder_perneira", false);
+  preferences.begin("encoder_pern", false);
   preferences.putInt("encoder_perneira", incoder_virtual_perneira_M1);
   preferences.end();
 
@@ -4495,39 +4801,29 @@ void bipBloqueio() {
 
 // ========== CARREGAMENTO DE PREFERÃŠNCIAS ==========
 void carregaPreferencias() {
-  if (!preferences.begin("cadeira", true)) {
-    preferences.begin("cadeira", false);
-  }
-  supabaseUserId = preferences.getString("user_id", "");
-  supabaseMaintenanceRequestSent = preferences.getBool("mnt_sent", false);
+  preferences.begin("cadeira", false);
+  supabaseUserId = preferences.isKey("user_id") ? preferences.getString("user_id", "") : "";
+  supabaseMaintenanceRequestSent = preferences.isKey("mnt_sent") ? preferences.getBool("mnt_sent", false) : false;
   preferences.end();
 
-  if (!preferences.begin("supabase", true)) {
-    preferences.begin("supabase", false);
-  }
-  supabaseUrl = preferences.getString("url", SUPABASE_URL);
-  supabaseKey = preferences.getString("key", SUPABASE_KEY);
+  preferences.begin("supabase", false);
+  supabaseUrl = preferences.isKey("url") ? preferences.getString("url", SUPABASE_URL) : String(SUPABASE_URL);
+  supabaseKey = preferences.isKey("key") ? preferences.getString("key", SUPABASE_KEY) : String(SUPABASE_KEY);
   if (supabaseKey.length() == 0) {
     supabaseKey = SUPABASE_KEY;
   }
   preferences.end();
 
   // Carrega posiÃ§Ãµes do encoder virtual M1
-  if (!preferences.begin("encoder_encosto", true)) {
-    preferences.begin("encoder_encosto", false);
-  }
+  preferences.begin("encoder_encosto", false);
   incoder_virtual_encosto_M1 = preferences.getInt("encoder_encosto", 0);
   preferences.end();
   
-  if (!preferences.begin("encoder_asento", true)) {
-    preferences.begin("encoder_asento", false);
-  }
+  preferences.begin("encoder_asento", false);
   incoder_virtual_asento_M1 = preferences.getInt("encoder_asento", 0);
   preferences.end();
   
-  if (!preferences.begin("encoder_perneira", true)) {
-    preferences.begin("encoder_perneira", false);
-  }
+  preferences.begin("encoder_pern", false);
   incoder_virtual_perneira_M1 = preferences.getInt("encoder_perneira", 0);
   preferences.end();
 
@@ -5558,7 +5854,7 @@ void executa_M1() {
     preferences.putInt("encoder_asento", incoder_virtual_asento_M1);
     preferences.end();
     
-    preferences.begin("encoder_perneira", false);
+    preferences.begin("encoder_pern", false);
     preferences.putInt("encoder_perneira", incoder_virtual_perneira_M1);
     preferences.end();
 
