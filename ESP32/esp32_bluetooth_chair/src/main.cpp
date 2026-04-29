@@ -507,7 +507,7 @@ static String supabaseKey = SUPABASE_KEY;
 const char* SENHA_AP = "12345678";                  // Senha da rede de configuração (mínimo 8 caracteres)
 // ============================================
 
-static String mqttHost = "test.mosquitto.org";
+static String mqttHost = "broker.emqx.io";
 static uint16_t mqttPort = 8883;
 static String mqttUser = "";
 static String mqttPass = "";
@@ -1257,12 +1257,8 @@ void reconnectMQTT() {
           if (tlsOk) {
             String cid = mqttClientId.length() > 0 ? mqttClientId : ("ESP32-" + NUMERO_SERIE_CADEIRA);
             bool connackOk = mqttRawConnackOnce(mqttHost, mqttPort, cid);
-            if (!connackOk && mqttHost == "test.mosquitto.org") {
-              mqttHost = "broker.emqx.io";
-              Serial.println("[MQTT] Broker TLS test.mosquitto.org sem CONNACK. Alternando para broker.emqx.io");
-              saveMqttPreferences();
-              mqttNextAttemptMs = now + 1000;
-              return;
+            if (!connackOk) {
+              Serial.println("[MQTT] Broker sem CONNACK no teste RAW");
             }
           }
         }
@@ -2057,8 +2053,15 @@ static const char* relayLabelByPin(int pin) {
   return "GPIO";
 }
 
+#ifndef RELE_DP_ACTIVE_LOW
+#define RELE_DP_ACTIVE_LOW 0
+#endif
+
 static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
   int newValue = on ? HIGH : LOW;
+  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
+    newValue = on ? LOW : HIGH;
+  }
   int oldValue = digitalRead(pin);
   if (oldValue == newValue) {
     return;
@@ -3450,7 +3453,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("MQTT_BUSY");
       return;
     }
-    mqttHost = "test.mosquitto.org";
+    mqttHost = "broker.emqx.io";
     mqttPort = 8883;
     mqttUser = "";
     mqttPass = "";
@@ -3758,6 +3761,9 @@ void executaComandoBluetooth(String cmd, const char* origin) {
   if (!cadeiraHabilitada && cmd != "STATUS" && cmd != "AT_SEG") {
     enviarBLE("ERRO:BLOQUEADA");
     Serial.println("Cadeira bloqueada - comando ignorado");
+    if (origin && String(origin) == "MQTT") {
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "BLOCKED", false);
+    }
     return;
   }
 
@@ -3784,6 +3790,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("SE:LIMIT");
+      Serial.println("[BLOCK] SE bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SE:LIMIT", false);
+      }
     }
   }
   else if (cmd == "DE") {
@@ -3801,6 +3811,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("DE:LIMIT");
+      Serial.println("[BLOCK] DE bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DE:LIMIT", false);
+      }
     }
   }
   else if (cmd == "SA") {
@@ -3818,6 +3832,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("SA:LIMIT");
+      Serial.println("[BLOCK] SA bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SA:LIMIT", false);
+      }
     }
   }
   else if (cmd == "DA") {
@@ -3835,6 +3853,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("DA:LIMIT");
+      Serial.println("[BLOCK] DA bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DA:LIMIT", false);
+      }
     }
   }
   else if (cmd == "SP") {
@@ -3844,6 +3866,9 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("GAVETA:OPEN");
       enviarBLE("SP:GAVETA");
       mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_OPEN", false);
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SP:GAVETA", false);
+      }
       mqttStatusDirty = true;
       return;
     }
@@ -3860,6 +3885,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("SP:LIMIT");
+      Serial.println("[BLOCK] SP bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SP:LIMIT", false);
+      }
     }
   }
   else if (cmd == "DP") {
@@ -3869,6 +3898,9 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("GAVETA:OPEN");
       enviarBLE("DP:GAVETA");
       mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_OPEN", false);
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DP:GAVETA", false);
+      }
       mqttStatusDirty = true;
       return;
     }
@@ -3885,6 +3917,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("DP:LIMIT");
+      Serial.println("[BLOCK] DP bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DP:LIMIT", false);
+      }
     }
   }
   else if (cmd == "TS") {
@@ -4511,10 +4547,17 @@ static void sendMotorTravelToSupabaseIfNeeded() {
   if (static_cast<int32_t>(now - motorTravelNextSendMs) < 0) {
     return;
   }
+  bool hasPending = (motorTravelUnsavedEncosto != 0 || motorTravelUnsavedAssento != 0 || motorTravelUnsavedPerneira != 0 || motorTravelUnsavedTrend != 0);
   motorTravelNextSendMs = now + MOTOR_TRAVEL_SEND_INTERVAL_MS;
+  if (!hasPending) {
+    return;
+  }
   saveMotorTravelPreferences(true);
   if (supabaseUpsertMotorTravel()) {
     supabaseLogUsage("MOTOR_TRAVEL_SENT");
+    bip();
+  } else {
+    bipLong();
   }
 }
 
