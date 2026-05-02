@@ -78,6 +78,10 @@ static const int IO_PCF_BASE = 100;
 #define PIN_INT_TREND_DESCE -1
 #endif
 
+#ifndef TREND_INPUT_MODE
+#define TREND_INPUT_MODE INPUT
+#endif
+
 #ifndef PIN_TREN_INT_SOBE
 #define PIN_TREN_INT_SOBE -1
 #endif
@@ -256,7 +260,7 @@ static void pcf8574PrintStatus(uint8_t in) {
   Serial.println("--------------------------------");
 }
 
-static void pcf8574ReportChanges(uint8_t oldIn, uint8_t newIn) {
+static void pcf8574ReportChanges(uint8_t oldIn, uint8_t newIn, const char* tag) {
   uint8_t diff = static_cast<uint8_t>(oldIn ^ newIn);
   if (diff == 0) {
     return;
@@ -265,7 +269,11 @@ static void pcf8574ReportChanges(uint8_t oldIn, uint8_t newIn) {
     if ((diff & (1U << p)) == 0) {
       continue;
     }
-    Serial.print("[PCF8574_INT] P");
+    if (tag && tag[0] != '\0') {
+      Serial.print(tag);
+      Serial.print(" ");
+    }
+    Serial.print("P");
     Serial.print(p);
     Serial.print("(");
     Serial.print(pcf8574PinLabel(p));
@@ -276,6 +284,114 @@ static void pcf8574ReportChanges(uint8_t oldIn, uint8_t newIn) {
   pcf8574PrintStatus(newIn);
 }
 #endif
+
+extern const int SA;
+extern const int RF;
+extern int GAVETA;
+extern const int TREN_INT_DESCE;
+extern const int TREN_INT_SOBE;
+extern const int INT_TREND_DESCE;
+extern const int INT_TREND_SOBE;
+
+static bool inputsDebugEnabled = false;
+static uint32_t inputsDebugLastPollMs = 0;
+static int lastGpioSa = -1;
+static int lastGpioRf = -1;
+static int lastGpioGaveta = -1;
+static int lastGpioTrendInDesce = -1;
+static int lastGpioTrendInSobe = -1;
+static int lastGpioIntTrendDesce = -1;
+static int lastGpioIntTrendSobe = -1;
+static int lastGpioPcfInt = -1;
+#if USE_PCF8574
+static uint8_t inputsDebugLastPcf = 0xFF;
+static uint32_t inputsDebugLastIrqCount = 0;
+#endif
+
+static void inputsDebugTick() {
+  if (!inputsDebugEnabled) {
+    return;
+  }
+  uint32_t now = millis();
+  if ((now - inputsDebugLastPollMs) < 100) {
+    return;
+  }
+  inputsDebugLastPollMs = now;
+
+  int sa = digitalRead(SA);
+  int rf = digitalRead(RF);
+  int gav = (GAVETA >= 0 ? digitalRead(GAVETA) : HIGH);
+  int tinD = (TREN_INT_DESCE >= 0 ? digitalRead(TREN_INT_DESCE) : HIGH);
+  int tinS = (TREN_INT_SOBE >= 0 ? digitalRead(TREN_INT_SOBE) : HIGH);
+  int intD = (INT_TREND_DESCE >= 0 ? digitalRead(INT_TREND_DESCE) : HIGH);
+  int intS = (INT_TREND_SOBE >= 0 ? digitalRead(INT_TREND_SOBE) : HIGH);
+  int pcfInt = (PCF8574_INT_PIN >= 0 ? digitalRead(static_cast<uint8_t>(PCF8574_INT_PIN)) : HIGH);
+
+  if (sa != lastGpioSa || rf != lastGpioRf || gav != lastGpioGaveta ||
+      tinD != lastGpioTrendInDesce || tinS != lastGpioTrendInSobe ||
+      intD != lastGpioIntTrendDesce || intS != lastGpioIntTrendSobe ||
+      pcfInt != lastGpioPcfInt) {
+    Serial.print("[IN_DBG] SA=");
+    Serial.print(sa == HIGH ? "1" : "0");
+    Serial.print(" RF=");
+    Serial.print(rf == HIGH ? "1" : "0");
+    Serial.print(" GAVETA=");
+    Serial.print((GAVETA >= 0) ? (gav == HIGH ? "1" : "0") : "NA");
+    Serial.print(" TREN_D=");
+    Serial.print((TREN_INT_DESCE >= 0) ? (tinD == HIGH ? "1" : "0") : "NA");
+    Serial.print(" TREN_S=");
+    Serial.print((TREN_INT_SOBE >= 0) ? (tinS == HIGH ? "1" : "0") : "NA");
+    Serial.print(" INT_D=");
+    Serial.print((INT_TREND_DESCE >= 0) ? (intD == HIGH ? "1" : "0") : "NA");
+    Serial.print(" INT_S=");
+    Serial.print((INT_TREND_SOBE >= 0) ? (intS == HIGH ? "1" : "0") : "NA");
+    Serial.print(" PCF_INT=");
+    Serial.println((PCF8574_INT_PIN >= 0) ? (pcfInt == HIGH ? "1" : "0") : "NA");
+
+    lastGpioSa = sa;
+    lastGpioRf = rf;
+    lastGpioGaveta = gav;
+    lastGpioTrendInDesce = tinD;
+    lastGpioTrendInSobe = tinS;
+    lastGpioIntTrendDesce = intD;
+    lastGpioIntTrendSobe = intS;
+    lastGpioPcfInt = pcfInt;
+  }
+
+#if USE_PCF8574
+  if (pcf8574Available) {
+    uint32_t irqCountSnapshot = pcf8574InterruptCount;
+    if (pcf8574UseInterrupt && (pcf8574InterruptPending || irqCountSnapshot != inputsDebugLastIrqCount)) {
+      Serial.print("[PCF8574_IRQ] CNT=");
+      Serial.print(static_cast<uint32_t>(irqCountSnapshot));
+      Serial.print(" LEVEL=");
+      if (PCF8574_INT_PIN >= 0) {
+        Serial.println(digitalRead(static_cast<uint8_t>(PCF8574_INT_PIN)) == HIGH ? "1" : "0");
+      } else {
+        Serial.println("NA");
+      }
+      inputsDebugLastIrqCount = irqCountSnapshot;
+
+      bool okRead = false;
+      uint8_t in = pcf8574ReadByte(static_cast<uint8_t>(PCF8574_ADDRESS), &okRead);
+      if (okRead) {
+        pcf8574ReportChanges(inputsDebugLastPcf, in, "[PCF8574]");
+        inputsDebugLastPcf = in;
+      } else {
+        Serial.println("[PCF8574] READ FAIL");
+      }
+      pcf8574InterruptPending = false;
+    } else if (!pcf8574UseInterrupt) {
+      bool okRead = false;
+      uint8_t in = pcf8574ReadByte(static_cast<uint8_t>(PCF8574_ADDRESS), &okRead);
+      if (okRead && in != inputsDebugLastPcf) {
+        pcf8574ReportChanges(inputsDebugLastPcf, in, "[PCF8574]");
+        inputsDebugLastPcf = in;
+      }
+    }
+  }
+#endif
+}
 
 static inline bool IO_isPcfPin(int pin) {
   return pin >= IO_PCF_BASE;
@@ -507,7 +623,7 @@ static String supabaseKey = SUPABASE_KEY;
 const char* SENHA_AP = "12345678";                  // Senha da rede de configuração (mínimo 8 caracteres)
 // ============================================
 
-static String mqttHost = "test.mosquitto.org";
+static String mqttHost = "broker.emqx.io";
 static uint16_t mqttPort = 8883;
 static String mqttUser = "";
 static String mqttPass = "";
@@ -1257,12 +1373,8 @@ void reconnectMQTT() {
           if (tlsOk) {
             String cid = mqttClientId.length() > 0 ? mqttClientId : ("ESP32-" + NUMERO_SERIE_CADEIRA);
             bool connackOk = mqttRawConnackOnce(mqttHost, mqttPort, cid);
-            if (!connackOk && mqttHost == "test.mosquitto.org") {
-              mqttHost = "broker.emqx.io";
-              Serial.println("[MQTT] Broker TLS test.mosquitto.org sem CONNACK. Alternando para broker.emqx.io");
-              saveMqttPreferences();
-              mqttNextAttemptMs = now + 1000;
-              return;
+            if (!connackOk) {
+              Serial.println("[MQTT] Broker sem CONNACK no teste RAW");
             }
           }
         }
@@ -2057,14 +2169,126 @@ static const char* relayLabelByPin(int pin) {
   return "GPIO";
 }
 
+#ifndef RELE_DP_ACTIVE_LOW
+#define RELE_DP_ACTIVE_LOW 0
+#endif
+
+static inline int relayLevelForWrite(int pin, bool on) {
+  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
+    return on ? LOW : HIGH;
+  }
+  return on ? HIGH : LOW;
+}
+
+static inline bool relayIsOn(int pin) {
+  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
+    return digitalRead(pin) == LOW;
+  }
+  return digitalRead(pin) == HIGH;
+}
+
+static const int kRelayTrackPins[] = {
+  Rele_SA,
+  Rele_DA,
+  Rele_SE,
+  Rele_DE,
+  Rele_SP,
+  Rele_DP,
+  Rele_refletor,
+  Rele_TREND_SOBE,
+  Rele_TREND_DESCE,
+};
+
+static bool relayTrackLastOn[sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])] = {};
+static uint32_t relayTrackOnSinceMs[sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])] = {};
+static char relayTrackLastSrc[sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])][16] = {};
+
+static int relayTrackIndexForPin(int pin) {
+  for (size_t i = 0; i < (sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])); i++) {
+    if (kRelayTrackPins[i] == pin) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+static void relayTrackNote(int pin, bool on, const char* src) {
+  int idx = relayTrackIndexForPin(pin);
+  if (idx < 0) return;
+  if (kRelayTrackPins[idx] < 0) return;
+
+  if (src && src[0] != '\0') {
+    snprintf(relayTrackLastSrc[idx], sizeof(relayTrackLastSrc[idx]), "%s", src);
+  }
+
+  bool isOnNow = relayIsOn(pin);
+  if (isOnNow && !relayTrackLastOn[idx]) {
+    relayTrackOnSinceMs[idx] = millis();
+  } else if (!isOnNow) {
+    relayTrackOnSinceMs[idx] = 0;
+  }
+  relayTrackLastOn[idx] = isOnNow;
+}
+
+static void relayTrackInitSnapshot() {
+  for (size_t i = 0; i < (sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])); i++) {
+    int pin = kRelayTrackPins[i];
+    if (pin < 0) {
+      relayTrackLastOn[i] = false;
+      relayTrackOnSinceMs[i] = 0;
+      relayTrackLastSrc[i][0] = '\0';
+      continue;
+    }
+    bool onNow = relayIsOn(pin);
+    relayTrackLastOn[i] = onNow;
+    relayTrackOnSinceMs[i] = onNow ? millis() : 0;
+    relayTrackLastSrc[i][0] = '\0';
+  }
+}
+
+static void relayTrackPrintOnRelays(const char* tag) {
+  uint32_t now = millis();
+  Serial.print("[RELAY] ");
+  if (tag && tag[0] != '\0') {
+    Serial.print(tag);
+    Serial.print(" ");
+  }
+  bool any = false;
+  for (size_t i = 0; i < (sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])); i++) {
+    int pin = kRelayTrackPins[i];
+    if (pin < 0) continue;
+    bool onNow = relayIsOn(pin);
+    if (!onNow) continue;
+    uint32_t since = relayTrackOnSinceMs[i];
+    uint32_t dur = (since != 0 && now >= since) ? (now - since) : 0;
+    Serial.print(any ? " | " : "");
+    any = true;
+    Serial.print(relayLabelByPin(pin));
+    Serial.print("(GPIO");
+    Serial.print(pin);
+    Serial.print(")");
+    Serial.print(" RB=");
+    Serial.print(digitalRead(pin) == HIGH ? "1" : "0");
+    Serial.print(" ON=1");
+    Serial.print(" T=");
+    Serial.print(dur);
+    Serial.print(" SRC=");
+    Serial.print(relayTrackLastSrc[i][0] ? relayTrackLastSrc[i] : "?");
+  }
+  if (!any) {
+    Serial.print("NONE");
+  }
+  Serial.println();
+}
+
 static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
-  int newValue = on ? HIGH : LOW;
+  int newValue = relayLevelForWrite(pin, on);
   int oldValue = digitalRead(pin);
   if (oldValue == newValue) {
+    relayTrackNote(pin, on, src);
     return;
   }
   digitalWrite(pin, newValue);
   int readBack = digitalRead(pin);
+  relayTrackNote(pin, on, src);
   if (pin == Rele_SA || pin == Rele_DA || pin == Rele_SE || pin == Rele_DE || pin == Rele_SP || pin == Rele_DP || pin == Rele_refletor || pin == Rele_TREND_SOBE || pin == Rele_TREND_DESCE) {
     mqttStatusDirty = true;
   }
@@ -2079,6 +2303,11 @@ static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
   Serial.print(on ? "1" : "0");
   Serial.print(" RB=");
   Serial.print(readBack == HIGH ? "1" : "0");
+  Serial.print(" ON=");
+  Serial.print(relayIsOn(pin) ? "1" : "0");
+  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
+    Serial.print(" ALOW=1");
+  }
   if (src && src[0] != '\0') {
     Serial.print(" ");
     Serial.print(src);
@@ -2203,6 +2432,52 @@ static uint32_t motorTravelNextSendMs = 0;
 static const uint32_t MOTOR_TRAVEL_SAVE_INTERVAL_MS = 10000;
 static const uint32_t MOTOR_TRAVEL_SEND_INTERVAL_MS = 900000;
 static bool encoderPulseDebug = false;
+static bool pulsePrintEnabled = false;
+static uint32_t pulsePrintLastTrend = 0;
+static uint32_t pulsePrintLastEncosto = 0;
+static uint32_t pulsePrintLastAssento = 0;
+static uint32_t pulsePrintLastPerneira = 0;
+static bool encoderMonEnabled = false;
+static uint32_t encoderMonNextMs = 0;
+static uint32_t encoderMonLastEnc = 0;
+static uint32_t encoderMonLastAss = 0;
+static uint32_t encoderMonLastPer = 0;
+static uint32_t encoderMonLastTrend = 0;
+
+static inline void encoderMonResetCounters() {
+  encoderMonLastEnc = pulses_encosto;
+  encoderMonLastAss = pulses_assento;
+  encoderMonLastPer = pulses_perneira;
+  encoderMonLastTrend = pulses_trend;
+}
+
+static void encoderMonTick() {
+  if (!encoderMonEnabled) return;
+  uint32_t now = millis();
+  if (static_cast<int32_t>(now - encoderMonNextMs) < 0) return;
+  encoderMonNextMs = now + 500;
+  uint32_t pe = pulses_encosto;
+  uint32_t pa = pulses_assento;
+  uint32_t pp = pulses_perneira;
+  uint32_t pt = pulses_trend;
+  uint32_t de = pe - encoderMonLastEnc;
+  uint32_t da = pa - encoderMonLastAss;
+  uint32_t dp = pp - encoderMonLastPer;
+  uint32_t dt = pt - encoderMonLastTrend;
+  encoderMonLastEnc = pe;
+  encoderMonLastAss = pa;
+  encoderMonLastPer = pp;
+  encoderMonLastTrend = pt;
+
+  Serial.print("[ENC_MON] ENC(GPIO"); Serial.print(ENCODER3); Serial.print(") L="); Serial.print(ENCODER3 >= 0 ? (digitalRead(ENCODER3) == HIGH ? "1" : "0") : "NA");
+  Serial.print(" P="); Serial.print(pe); Serial.print(" d="); Serial.print(de);
+  Serial.print(" | ASS(GPIO"); Serial.print(ENCODER1); Serial.print(") L="); Serial.print(ENCODER1 >= 0 ? (digitalRead(ENCODER1) == HIGH ? "1" : "0") : "NA");
+  Serial.print(" P="); Serial.print(pa); Serial.print(" d="); Serial.print(da);
+  Serial.print(" | PER(GPIO"); Serial.print(ENCODER2); Serial.print(") L="); Serial.print(ENCODER2 >= 0 ? (digitalRead(ENCODER2) == HIGH ? "1" : "0") : "NA");
+  Serial.print(" P="); Serial.print(pp); Serial.print(" d="); Serial.print(dp);
+  Serial.print(" | TREND(GPIO"); Serial.print(ENCODER_TREND); Serial.print(") L="); Serial.print(ENCODER_TREND >= 0 ? (digitalRead(ENCODER_TREND) == HIGH ? "1" : "0") : "NA");
+  Serial.print(" P="); Serial.print(pt); Serial.print(" d="); Serial.println(dt);
+}
 
 // Mapeamento solicitado:
 // ENCODER1 -> Assento
@@ -2360,28 +2635,32 @@ void setup() {
   pinMode(DP, INPUT_PULLUP);
   pinMode(M1, INPUT_PULLUP);
   if (TREN_INT_DESCE >= 0) {
-    pinMode(TREN_INT_DESCE, INPUT_PULLDOWN);
+    pinMode(TREN_INT_DESCE, TREND_INPUT_MODE);
     Serial.print("[TREND] TREN_INT_DESCE(GPIO");
     Serial.print(TREN_INT_DESCE);
-    Serial.println(")");
+    Serial.print(") INIT=");
+    Serial.println(digitalRead(TREN_INT_DESCE) == HIGH ? 1 : 0);
   }
   if (INT_TREND_DESCE >= 0) {
-    pinMode(INT_TREND_DESCE, INPUT_PULLDOWN);
+    pinMode(INT_TREND_DESCE, TREND_INPUT_MODE);
     Serial.print("[TREND] INT_TREND_DESCE(GPIO");
     Serial.print(INT_TREND_DESCE);
-    Serial.println(")");
+    Serial.print(") INIT=");
+    Serial.println(digitalRead(INT_TREND_DESCE) == HIGH ? 1 : 0);
   }
   if (TREN_INT_SOBE >= 0) {
-    pinMode(TREN_INT_SOBE, INPUT_PULLDOWN);
+    pinMode(TREN_INT_SOBE, TREND_INPUT_MODE);
     Serial.print("[TREND] TREN_INT_SOBE(GPIO");
     Serial.print(TREN_INT_SOBE);
-    Serial.println(")");
+    Serial.print(") INIT=");
+    Serial.println(digitalRead(TREN_INT_SOBE) == HIGH ? 1 : 0);
   }
   if (INT_TREND_SOBE >= 0) {
-    pinMode(INT_TREND_SOBE, INPUT_PULLDOWN);
+    pinMode(INT_TREND_SOBE, TREND_INPUT_MODE);
     Serial.print("[TREND] INT_TREND_SOBE(GPIO");
     Serial.print(INT_TREND_SOBE);
-    Serial.println(")");
+    Serial.print(") INIT=");
+    Serial.println(digitalRead(INT_TREND_SOBE) == HIGH ? 1 : 0);
   }
   if (GAVETA >= 0) {
     pinMode(GAVETA, INPUT_PULLUP);
@@ -2445,6 +2724,7 @@ void setup() {
   setOutputPin(Rele_refletor, false, nullptr, false);
   if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, nullptr, false);
   if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, nullptr, false);
+  relayTrackInitSnapshot();
   Serial.println("Pinos configurados.");
   delay(500);
 
@@ -2685,6 +2965,57 @@ static void trendTickInputs() {
     return;
   }
 
+  static const uint32_t TREND_GPIO_PRINT_STABLE_MS = 5;
+  uint32_t nowDbg = millis();
+
+  static int lastRaw39 = -1;
+  static uint32_t highSince39 = 0;
+  static bool printed39 = false;
+  if (TREN_INT_DESCE >= 0) {
+    int raw = digitalRead(TREN_INT_DESCE);
+    if (lastRaw39 == -1) lastRaw39 = raw;
+    if (raw == HIGH) {
+      if (lastRaw39 != HIGH) {
+        highSince39 = nowDbg;
+        printed39 = false;
+      }
+      if (!printed39 && highSince39 > 0 && (nowDbg - highSince39) >= TREND_GPIO_PRINT_STABLE_MS) {
+        Serial.print("GPIO ");
+        Serial.print(TREN_INT_DESCE);
+        Serial.println(" ACIONADO");
+        printed39 = true;
+      }
+    } else {
+      highSince39 = 0;
+      printed39 = false;
+    }
+    lastRaw39 = raw;
+  }
+
+  static int lastRaw8 = -1;
+  static uint32_t highSince8 = 0;
+  static bool printed8 = false;
+  if (INT_TREND_DESCE >= 0) {
+    int raw = digitalRead(INT_TREND_DESCE);
+    if (lastRaw8 == -1) lastRaw8 = raw;
+    if (raw == HIGH) {
+      if (lastRaw8 != HIGH) {
+        highSince8 = nowDbg;
+        printed8 = false;
+      }
+      if (!printed8 && highSince8 > 0 && (nowDbg - highSince8) >= TREND_GPIO_PRINT_STABLE_MS) {
+        Serial.print("GPIO ");
+        Serial.print(INT_TREND_DESCE);
+        Serial.println(" ACIONADO");
+        printed8 = true;
+      }
+    } else {
+      highSince8 = 0;
+      printed8 = false;
+    }
+    lastRaw8 = raw;
+  }
+
   static bool init_trenUp = false, raw_trenUp = false, stable_trenUp = false;
   static uint32_t chg_trenUp = 0;
   static bool init_trendUp = false, raw_trendUp = false, stable_trendUp = false;
@@ -2878,7 +3209,7 @@ void loop() {
     bool okRead = false;
     uint8_t in = pcf8574ReadByte(static_cast<uint8_t>(PCF8574_ADDRESS), &okRead);
     if (okRead) {
-      pcf8574ReportChanges(pcf8574LastIn, in);
+      pcf8574ReportChanges(pcf8574LastIn, in, "[PCF8574_INT]");
       pcf8574LastIn = in;
     }
     pcf8574InterruptPending = false;
@@ -2889,6 +3220,7 @@ void loop() {
   Button_Seg();
   monitora_tempo_rele();
   contagem_tempo_incoder_virtual();
+  encoderMonTick();
 #endif
   delay(10);
   return;
@@ -2917,6 +3249,7 @@ void loop() {
       }
     }
   }
+  inputsDebugTick();
   trendTickInputs();
   trendDebugTick();
 
@@ -2935,6 +3268,7 @@ void loop() {
 
   // FunÃ§Ãµes originais de controle
   contagem_tempo_incoder_virtual();
+  encoderMonTick();
   Watch_Dog();
   buzzerTestTick();
   beepSeqTick();
@@ -3450,7 +3784,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("MQTT_BUSY");
       return;
     }
-    mqttHost = "test.mosquitto.org";
+    mqttHost = "broker.emqx.io";
     mqttPort = 8883;
     mqttUser = "";
     mqttPass = "";
@@ -3613,13 +3947,84 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     return;
   }
 
-  if (cmd == "TEST_SA") { setOutputPin(Rele_SA, true, "TEST"); delay(500); setOutputPin(Rele_SA, false, "TEST"); return; }
-  if (cmd == "TEST_DA") { setOutputPin(Rele_DA, true, "TEST"); delay(500); setOutputPin(Rele_DA, false, "TEST"); return; }
-  if (cmd == "TEST_SE") { setOutputPin(Rele_SE, true, "TEST"); delay(500); setOutputPin(Rele_SE, false, "TEST"); return; }
-  if (cmd == "TEST_DE") { setOutputPin(Rele_DE, true, "TEST"); delay(500); setOutputPin(Rele_DE, false, "TEST"); return; }
-  if (cmd == "TEST_SP") { setOutputPin(Rele_SP, true, "TEST"); delay(500); setOutputPin(Rele_SP, false, "TEST"); return; }
-  if (cmd == "TEST_DP") { setOutputPin(Rele_DP, true, "TEST"); delay(500); setOutputPin(Rele_DP, false, "TEST"); return; }
-  if (cmd == "TEST_RF") { setOutputPin(Rele_refletor, true, "TEST"); delay(500); setOutputPin(Rele_refletor, false, "TEST"); return; }
+  if (cmd == "INPUT_DBG_ON") {
+    inputsDebugEnabled = true;
+    inputsDebugLastPollMs = 0;
+    lastGpioSa = -1;
+    lastGpioRf = -1;
+    lastGpioGaveta = -1;
+    lastGpioTrendInDesce = -1;
+    lastGpioTrendInSobe = -1;
+    lastGpioIntTrendDesce = -1;
+    lastGpioIntTrendSobe = -1;
+    lastGpioPcfInt = -1;
+#if USE_PCF8574
+    inputsDebugLastPcf = 0xFF;
+    inputsDebugLastIrqCount = pcf8574InterruptCount;
+#endif
+    Serial.println("[IN_DBG] ON");
+    return;
+  }
+  if (cmd == "INPUT_DBG_OFF") {
+    inputsDebugEnabled = false;
+    Serial.println("[IN_DBG] OFF");
+    return;
+  }
+  if (cmd == "INPUT_DBG_STATUS") {
+    Serial.print("[IN_DBG] ");
+    Serial.println(inputsDebugEnabled ? "ON" : "OFF");
+    return;
+  }
+
+  if (cmd == "RELAY_STATUS") { relayTrackPrintOnRelays("STATUS"); return; }
+
+  if (cmd == "TEST_SA") { ultimoComandoRemoto = millis(); setOutputPin(Rele_SA, true, "TEST"); delay(500); setOutputPin(Rele_SA, false, "TEST"); return; }
+  if (cmd == "TEST_DA") { ultimoComandoRemoto = millis(); setOutputPin(Rele_DA, true, "TEST"); delay(500); setOutputPin(Rele_DA, false, "TEST"); return; }
+  if (cmd == "TEST_SE") { ultimoComandoRemoto = millis(); setOutputPin(Rele_SE, true, "TEST"); delay(500); setOutputPin(Rele_SE, false, "TEST"); return; }
+  if (cmd == "TEST_DE") { ultimoComandoRemoto = millis(); setOutputPin(Rele_DE, true, "TEST"); delay(500); setOutputPin(Rele_DE, false, "TEST"); return; }
+  if (cmd == "TEST_SP") { ultimoComandoRemoto = millis(); setOutputPin(Rele_SP, true, "TEST"); delay(500); setOutputPin(Rele_SP, false, "TEST"); return; }
+  if (cmd == "TEST_DP") { ultimoComandoRemoto = millis(); setOutputPin(Rele_DP, true, "TEST"); delay(500); setOutputPin(Rele_DP, false, "TEST"); return; }
+  if (cmd == "TEST_RF") { ultimoComandoRemoto = millis(); setOutputPin(Rele_refletor, true, "TEST"); delay(500); setOutputPin(Rele_refletor, false, "TEST"); return; }
+
+  if (cmd == "ENC_STATUS") {
+    Serial.print("[ENC] ENCODER1(GPIO"); Serial.print(ENCODER1); Serial.print(") L="); Serial.println(ENCODER1 >= 0 ? (digitalRead(ENCODER1) == HIGH ? "1" : "0") : "NA");
+    Serial.print("[ENC] ENCODER2(GPIO"); Serial.print(ENCODER2); Serial.print(") L="); Serial.println(ENCODER2 >= 0 ? (digitalRead(ENCODER2) == HIGH ? "1" : "0") : "NA");
+    Serial.print("[ENC] ENCODER3(GPIO"); Serial.print(ENCODER3); Serial.print(") L="); Serial.println(ENCODER3 >= 0 ? (digitalRead(ENCODER3) == HIGH ? "1" : "0") : "NA");
+    Serial.print("[ENC] TREND(GPIO"); Serial.print(ENCODER_TREND); Serial.print(") L="); Serial.println(ENCODER_TREND >= 0 ? (digitalRead(ENCODER_TREND) == HIGH ? "1" : "0") : "NA");
+    Serial.print("[ENC] PULSES ENC="); Serial.print(pulses_encosto);
+    Serial.print(" ASS="); Serial.print(pulses_assento);
+    Serial.print(" PER="); Serial.print(pulses_perneira);
+    Serial.print(" TREND="); Serial.println(pulses_trend);
+    return;
+  }
+  if (cmd == "ENC_RESET") {
+    noInterrupts();
+    pulses_encosto = 0;
+    pulses_assento = 0;
+    pulses_perneira = 0;
+    pulses_trend = 0;
+    last_pulses_encosto = 0;
+    last_pulses_assento = 0;
+    last_pulses_perneira = 0;
+    last_pulses_trend = 0;
+    last_pulses_trend_travel = 0;
+    interrupts();
+    encoderMonResetCounters();
+    Serial.println("[ENC] RESET");
+    return;
+  }
+  if (cmd == "ENC_MON_ON") {
+    encoderMonEnabled = true;
+    encoderMonNextMs = 0;
+    encoderMonResetCounters();
+    Serial.println("[ENC_MON] ON");
+    return;
+  }
+  if (cmd == "ENC_MON_OFF") {
+    encoderMonEnabled = false;
+    Serial.println("[ENC_MON] OFF");
+    return;
+  }
 
   if (cmd == "PCF8574_INT") {
     Serial.print("[PCF8574] INT_PIN=");
@@ -3758,6 +4163,9 @@ void executaComandoBluetooth(String cmd, const char* origin) {
   if (!cadeiraHabilitada && cmd != "STATUS" && cmd != "AT_SEG") {
     enviarBLE("ERRO:BLOQUEADA");
     Serial.println("Cadeira bloqueada - comando ignorado");
+    if (origin && String(origin) == "MQTT") {
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "BLOCKED", false);
+    }
     return;
   }
 
@@ -3784,6 +4192,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("SE:LIMIT");
+      Serial.println("[BLOCK] SE bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SE:LIMIT", false);
+      }
     }
   }
   else if (cmd == "DE") {
@@ -3801,6 +4213,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("DE:LIMIT");
+      Serial.println("[BLOCK] DE bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DE:LIMIT", false);
+      }
     }
   }
   else if (cmd == "SA") {
@@ -3818,6 +4234,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("SA:LIMIT");
+      Serial.println("[BLOCK] SA bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SA:LIMIT", false);
+      }
     }
   }
   else if (cmd == "DA") {
@@ -3835,6 +4255,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("DA:LIMIT");
+      Serial.println("[BLOCK] DA bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DA:LIMIT", false);
+      }
     }
   }
   else if (cmd == "SP") {
@@ -3844,6 +4268,9 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("GAVETA:OPEN");
       enviarBLE("SP:GAVETA");
       mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_OPEN", false);
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SP:GAVETA", false);
+      }
       mqttStatusDirty = true;
       return;
     }
@@ -3860,6 +4287,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("SP:LIMIT");
+      Serial.println("[BLOCK] SP bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SP:LIMIT", false);
+      }
     }
   }
   else if (cmd == "DP") {
@@ -3869,6 +4300,9 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("GAVETA:OPEN");
       enviarBLE("DP:GAVETA");
       mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_OPEN", false);
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DP:GAVETA", false);
+      }
       mqttStatusDirty = true;
       return;
     }
@@ -3885,6 +4319,10 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("DP:LIMIT");
+      Serial.println("[BLOCK] DP bloqueado (limite)");
+      if (origin && String(origin) == "MQTT") {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DP:LIMIT", false);
+      }
     }
   }
   else if (cmd == "TS") {
@@ -4064,6 +4502,52 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     encoderPulseDebug = false;
     enviarBLE("ENC_DEBUG:OFF");
   }
+  else if (cmd == "TREND_PULSE_ON") {
+    pulsePrintEnabled = true;
+    pulsePrintLastTrend = static_cast<uint32_t>(pulses_trend);
+    pulsePrintLastEncosto = static_cast<uint32_t>(pulses_encosto);
+    pulsePrintLastAssento = static_cast<uint32_t>(pulses_assento);
+    pulsePrintLastPerneira = static_cast<uint32_t>(pulses_perneira);
+    Serial.println("[PULSE] ON");
+    enviarBLE("TREND_PULSE:ON");
+  }
+  else if (cmd == "TREND_PULSE_OFF") {
+    pulsePrintEnabled = false;
+    Serial.println("[PULSE] OFF");
+    enviarBLE("TREND_PULSE:OFF");
+  }
+  else if (cmd == "TREND_PULSE_STATUS") {
+    Serial.print("[PULSE] ");
+    Serial.println(pulsePrintEnabled ? "ON" : "OFF");
+    enviarBLE(pulsePrintEnabled ? "TREND_PULSE:ON" : "TREND_PULSE:OFF");
+  }
+  else if (cmd == "PULSE_ON") {
+    pulsePrintEnabled = true;
+    pulsePrintLastTrend = static_cast<uint32_t>(pulses_trend);
+    pulsePrintLastEncosto = static_cast<uint32_t>(pulses_encosto);
+    pulsePrintLastAssento = static_cast<uint32_t>(pulses_assento);
+    pulsePrintLastPerneira = static_cast<uint32_t>(pulses_perneira);
+    Serial.println("[PULSE] ON");
+    enviarBLE("PULSE:ON");
+  }
+  else if (cmd == "PULSE_OFF") {
+    pulsePrintEnabled = false;
+    Serial.println("[PULSE] OFF");
+    enviarBLE("PULSE:OFF");
+  }
+  else if (cmd == "PULSE_STATUS") {
+    Serial.print("[PULSE] ");
+    Serial.print(pulsePrintEnabled ? "ON" : "OFF");
+    Serial.print(" | M1(TREND)=");
+    Serial.print(static_cast<uint32_t>(pulses_trend));
+    Serial.print(" M2(ENC)=");
+    Serial.print(static_cast<uint32_t>(pulses_encosto));
+    Serial.print(" M3(ASS)=");
+    Serial.print(static_cast<uint32_t>(pulses_assento));
+    Serial.print(" M4(PER)=");
+    Serial.println(static_cast<uint32_t>(pulses_perneira));
+    enviarBLE(pulsePrintEnabled ? "PULSE:ON" : "PULSE:OFF");
+  }
   else {
     enviarBLE("ERRO:CMD_INVALIDO");
   }
@@ -4129,7 +4613,7 @@ void atualizaHorimetro() {
   // Verifica se algum motor está ligado (HIGH = ligado)
   bool algumMotorLigado = (digitalRead(Rele_SA) == HIGH) || (digitalRead(Rele_DA) == HIGH) ||
                           (digitalRead(Rele_SE) == HIGH) || (digitalRead(Rele_DE) == HIGH) ||
-                          (digitalRead(Rele_SP) == HIGH) || (digitalRead(Rele_DP) == HIGH) ||
+                          (digitalRead(Rele_SP) == HIGH) || relayIsOn(Rele_DP) ||
                           (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) ||
                           (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH);
   
@@ -4511,10 +4995,17 @@ static void sendMotorTravelToSupabaseIfNeeded() {
   if (static_cast<int32_t>(now - motorTravelNextSendMs) < 0) {
     return;
   }
+  bool hasPending = (motorTravelUnsavedEncosto != 0 || motorTravelUnsavedAssento != 0 || motorTravelUnsavedPerneira != 0 || motorTravelUnsavedTrend != 0);
   motorTravelNextSendMs = now + MOTOR_TRAVEL_SEND_INTERVAL_MS;
+  if (!hasPending) {
+    return;
+  }
   saveMotorTravelPreferences(true);
   if (supabaseUpsertMotorTravel()) {
     supabaseLogUsage("MOTOR_TRAVEL_SENT");
+    bip();
+  } else {
+    bipLong();
   }
 }
 
@@ -4956,7 +5447,7 @@ void contagem_tempo_incoder_virtual() {
   bool dir_asento_up = (digitalRead(Rele_SA) == HIGH);
   bool dir_asento_down = (digitalRead(Rele_DA) == HIGH);
   bool dir_perneira_up = (digitalRead(Rele_SP) == HIGH);
-  bool dir_perneira_down = (digitalRead(Rele_DP) == HIGH);
+  bool dir_perneira_down = relayIsOn(Rele_DP);
 
   uint32_t d_encosto = pulses_encosto - last_pulses_encosto;
   uint32_t d_asento = pulses_assento - last_pulses_assento;
@@ -4966,6 +5457,39 @@ void contagem_tempo_incoder_virtual() {
   last_pulses_assento = pulses_assento;
   last_pulses_perneira = pulses_perneira;
   last_pulses_trend_travel = pulses_trend;
+
+  if (pulsePrintEnabled) {
+    uint32_t curTrend = static_cast<uint32_t>(pulses_trend);
+    uint32_t curEnc = static_cast<uint32_t>(pulses_encosto);
+    uint32_t curAss = static_cast<uint32_t>(pulses_assento);
+    uint32_t curPer = static_cast<uint32_t>(pulses_perneira);
+
+    if (curTrend < pulsePrintLastTrend) pulsePrintLastTrend = curTrend;
+    if (curEnc < pulsePrintLastEncosto) pulsePrintLastEncosto = curEnc;
+    if (curAss < pulsePrintLastAssento) pulsePrintLastAssento = curAss;
+    if (curPer < pulsePrintLastPerneira) pulsePrintLastPerneira = curPer;
+
+    while (pulsePrintLastTrend < curTrend) {
+      pulsePrintLastTrend++;
+      Serial.print("PULSO NO TREND MOTOR 1 = ");
+      Serial.println(pulsePrintLastTrend);
+    }
+    while (pulsePrintLastEncosto < curEnc) {
+      pulsePrintLastEncosto++;
+      Serial.print("PULSO NO TREND MOTOR 2 = ");
+      Serial.println(pulsePrintLastEncosto);
+    }
+    while (pulsePrintLastAssento < curAss) {
+      pulsePrintLastAssento++;
+      Serial.print("PULSO NO TREND MOTOR 3 = ");
+      Serial.println(pulsePrintLastAssento);
+    }
+    while (pulsePrintLastPerneira < curPer) {
+      pulsePrintLastPerneira++;
+      Serial.print("PULSO NO TREND MOTOR 4 = ");
+      Serial.println(pulsePrintLastPerneira);
+    }
+  }
 
   if (d_encosto) {
     motorTravelPulsesEncosto += d_encosto;
@@ -5086,8 +5610,8 @@ const unsigned long TIMEOUT_RELE = 30000; // 30 segundos
 // ========== MONITORAMENTO DE TEMPO DOS RELÃ‰S (seguranÃ§a) ==========
 void monitora_tempo_rele() {
   if (isGavetaAberta()) {
-    bool spOn = (digitalRead(Rele_SP) == HIGH);
-    bool dpOn = (digitalRead(Rele_DP) == HIGH);
+    bool spOn = relayIsOn(Rele_SP);
+    bool dpOn = relayIsOn(Rele_DP);
     if (spOn || dpOn) {
       Serial.println("[GAVETA] Aberta - desligando perneira");
       setOutputPin(Rele_SP, false, "GAVETA");
@@ -5101,19 +5625,21 @@ void monitora_tempo_rele() {
     }
   }
 
-  bool algumReleAtivo = (digitalRead(Rele_SE) == HIGH || 
-                         digitalRead(Rele_SA) == HIGH || 
-                         digitalRead(Rele_DA) == HIGH || 
-                         digitalRead(Rele_SP) == HIGH || 
-                         digitalRead(Rele_DP) == HIGH || 
-                         digitalRead(Rele_DE) == HIGH ||
-                         (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) ||
-                         (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH));
+  bool seOn = relayIsOn(Rele_SE);
+  bool saOn = relayIsOn(Rele_SA);
+  bool daOn = relayIsOn(Rele_DA);
+  bool spOn = relayIsOn(Rele_SP);
+  bool dpOn = relayIsOn(Rele_DP);
+  bool deOn = relayIsOn(Rele_DE);
+  bool trendSobeOn = (Rele_TREND_SOBE >= 0 && relayIsOn(Rele_TREND_SOBE));
+  bool trendDesceOn = (Rele_TREND_DESCE >= 0 && relayIsOn(Rele_TREND_DESCE));
+  bool algumReleAtivo = (seOn || saOn || daOn || spOn || dpOn || deOn || trendSobeOn || trendDesceOn);
 
   if (algumReleAtivo) {
     if (inicioAtivacaoRele == 0) {
       inicioAtivacaoRele = millis();
     } else if (millis() - inicioAtivacaoRele >= TIMEOUT_RELE) {
+      relayTrackPrintOnRelays("TIMEOUT");
       Serial.println("!!! TIMEOUT DE SEGURANÃ‡A - RELÃ‰ ATIVO POR 30s !!!");
       AT_SEG();
       inicioAtivacaoRele = 0;
@@ -5981,33 +6507,30 @@ void executa_M1() {
 
 // ========== PARADA DE EMERGÃŠNCIA (AT_SEG) ==========
 void AT_SEG() {
-  if (faz_bt_seg == 1) {
-    Serial.println("Parando todos os movimentos");
-    enviarBLE("AT_SEG:STOPPING");
+  Serial.println("Parando todos os movimentos");
+  enviarBLE("AT_SEG:STOPPING");
 
-    setOutputPin(Rele_DE, false, "AT_SEG");
-    setOutputPin(Rele_SE, false, "AT_SEG");
-    setOutputPin(Rele_SA, false, "AT_SEG");
-    setOutputPin(Rele_DA, false, "AT_SEG");
-    setOutputPin(Rele_SP, false, "AT_SEG");
-    setOutputPin(Rele_DP, false, "AT_SEG");
-    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "AT_SEG");
-    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "AT_SEG");
+  setOutputPin(Rele_DE, false, "AT_SEG");
+  setOutputPin(Rele_SE, false, "AT_SEG");
+  setOutputPin(Rele_SA, false, "AT_SEG");
+  setOutputPin(Rele_DA, false, "AT_SEG");
+  setOutputPin(Rele_SP, false, "AT_SEG");
+  setOutputPin(Rele_DP, false, "AT_SEG");
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "AT_SEG");
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "AT_SEG");
 
-    // Atualiza estados
-    estado_de = false;
-    estado_se = false;
-    estado_sa = false;
-    estado_da = false;
-    estado_sp = false;
-    estado_dp = false;
-    estado_trend_sobe = false;
-    estado_trend_desce = false;
+  estado_de = false;
+  estado_se = false;
+  estado_sa = false;
+  estado_da = false;
+  estado_sp = false;
+  estado_dp = false;
+  estado_trend_sobe = false;
+  estado_trend_desce = false;
 
-    faz_bt_seg = 0;
-    cont = 0;
-    cont13 = 0;
-  }
+  faz_bt_seg = 0;
+  cont = 0;
+  cont13 = 0;
   delay(100);
 }
 
