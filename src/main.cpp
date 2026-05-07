@@ -127,7 +127,7 @@ static const int IO_PCF_BASE = 100;
 #endif
 
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "0.0.0"
+#define FIRMWARE_VERSION "0.0.1"
 #endif
 
 static bool i2cPing(uint8_t address) {
@@ -651,6 +651,10 @@ static String otaManifestUrl = "";
 static uint32_t otaIntervalSec = 21600;
 static uint32_t otaNextCheckAtMs = 0;
 static String otaPendingVersion = "";
+static String otaValidatedVersionToReport = "";
+static String otaActiveDeviceUpdateId = "";
+static String otaActiveFromVersion = "";
+static String otaActiveToVersion = "";
 
 typedef struct {
   bool available;
@@ -659,7 +663,16 @@ typedef struct {
   String url;
   String md5;
   int size;
+  int minBattery;
+  int minRssi;
 } OtaInfo;
+
+typedef struct {
+  bool found;
+  String id;
+  bool enabled;
+  String currentFirmware;
+} ChairOtaInfo;
 
 static inline bool mqttLockMs(uint32_t ms) {
   if (!mqttMutex) {
@@ -840,6 +853,7 @@ static void supabaseLogUsage(const char* action);
 static void supabaseCreateMaintenanceRequestIfNeeded();
 static void supabaseSaveMemoryPosition(int slot);
 static bool supabaseLoadMemoryPositionFromDb(int slot);
+static bool supabaseGetJson(const String& restPath, String& responseOut);
 static void loadMotorTravelPreferences();
 static void saveMotorTravelPreferences(bool force);
 static void sendMotorTravelToSupabaseIfNeeded();
@@ -907,7 +921,7 @@ static void otaLoadPreferences() {
   if (!p.begin("ota", false)) {
     return;
   }
-  otaEnabled = p.isKey("enabled") ? p.getBool("enabled", false) : false;
+  otaEnabled = p.isKey("enabled") ? p.getBool("enabled", true) : true;
   otaManifestUrl = p.isKey("manifest") ? p.getString("manifest", "") : "";
   otaIntervalSec = p.isKey("interval") ? p.getUInt("interval", 21600) : 21600;
   otaPendingVersion = p.isKey("pending") ? p.getString("pending", "") : "";
@@ -1005,6 +1019,41 @@ static bool otaParseManifestJson(const String& body, OtaInfo& out) {
   return true;
 }
 
+static bool supabasePatchJson(const String& restPath, const String& payload) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (ESP.getFreeHeap() < 30000) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  String url = supabaseUrl + restPath;
+  if (!http.begin(client, url)) {
+    return false;
+  }
+
+  http.setTimeout(10000);
+  http.addHeader("Content-Type", "application/json");
+  if (supabaseKey.length() > 0) {
+    http.addHeader("apikey", supabaseKey);
+    http.addHeader("Authorization", String("Bearer ") + supabaseKey);
+  }
+  http.addHeader("Prefer", "return=minimal");
+
+  int httpCode = http.PATCH(payload);
+  bool ok = (httpCode == 200 || httpCode == 204);
+  if (!ok && httpCode > 0) {
+    Serial.print("[ERRO] Supabase PATCH ");
+    Serial.print(restPath);
+    Serial.print(" ");
+    Serial.print(httpCode);
+    Serial.print(" ");
+    Serial.println(http.getString());
+  }
+  http.end();
+  return ok;
+}
+
 static bool otaFetchManifest(OtaInfo& out) {
   if (WiFi.status() != WL_CONNECTED) {
     return false;
@@ -1051,6 +1100,248 @@ static bool otaFetchManifest(OtaInfo& out) {
   return otaParseManifestJson(body, out);
 }
 
+static bool supabasePostJsonResponse(const String& restPath, const String& payload, String& responseOut) {
+  responseOut = "";
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (ESP.getFreeHeap() < 30000) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  String url = supabaseUrl + restPath;
+  if (!http.begin(client, url)) {
+    return false;
+  }
+
+  http.setTimeout(10000);
+  http.addHeader("Content-Type", "application/json");
+  if (supabaseKey.length() > 0) {
+    http.addHeader("apikey", supabaseKey);
+    http.addHeader("Authorization", String("Bearer ") + supabaseKey);
+  }
+  http.addHeader("Prefer", "return=representation");
+
+  int httpCode = http.POST(payload);
+  bool ok = (httpCode == 200 || httpCode == 201);
+  if (ok) {
+    responseOut = http.getString();
+  } else if (httpCode > 0) {
+    Serial.print("[ERRO] Supabase POST ");
+    Serial.print(restPath);
+    Serial.print(" ");
+    Serial.print(httpCode);
+    Serial.print(" ");
+    Serial.println(http.getString());
+  }
+  http.end();
+  return ok;
+}
+
+static int otaGetBatteryPercent() {
+  return -1;
+}
+
+static bool otaFetchFromSupabaseTables(OtaInfo& out, ChairOtaInfo& chairOut) {
+  out.available = false;
+  out.mandatory = false;
+  out.version = "";
+  out.url = "";
+  out.md5 = "";
+  out.size = 0;
+  out.minBattery = -1;
+  out.minRssi = -999;
+  chairOut.found = false;
+  chairOut.id = "";
+  chairOut.enabled = true;
+  chairOut.currentFirmware = "";
+
+  String chairResp;
+  String chairPath = "/rest/v1/chairs?select=id,enabled,current_firmware&serial_number=eq." + NUMERO_SERIE_CADEIRA + "&limit=1";
+  if (supabaseGetJson(chairPath, chairResp)) {
+    DynamicJsonDocument doc(1536);
+    DeserializationError err = deserializeJson(doc, chairResp);
+    if (!err && doc.is<JsonArray>() && doc.size() > 0) {
+      JsonObject c = doc[0].as<JsonObject>();
+      chairOut.found = true;
+      chairOut.id = c["id"] | "";
+      chairOut.enabled = c["enabled"] | true;
+      chairOut.currentFirmware = c["current_firmware"] | "";
+    }
+  }
+
+  Serial.print("[OTA] chair ");
+  Serial.print(chairOut.found ? "FOUND" : "NOT_FOUND");
+  Serial.print(" enabled=");
+  Serial.print(chairOut.enabled ? "1" : "0");
+  Serial.print(" current_firmware=");
+  Serial.println(chairOut.currentFirmware.length() ? chairOut.currentFirmware : "NA");
+
+  if (chairOut.found && !chairOut.enabled) {
+    return true;
+  }
+
+  String fwResp;
+  String fwPath = "/rest/v1/firmware_versions?select=version,download_url,file_size,md5_hash,min_battery,min_rssi,mandatory,enabled,published_at&enabled=eq.true&order=published_at.desc&limit=1";
+  if (!supabaseGetJson(fwPath, fwResp)) {
+    return false;
+  }
+
+  DynamicJsonDocument doc(2048);
+  DeserializationError err = deserializeJson(doc, fwResp);
+  if (err || !doc.is<JsonArray>() || doc.size() == 0) {
+    return false;
+  }
+  JsonObject f = doc[0].as<JsonObject>();
+  out.version = f["version"] | "";
+  out.url = f["download_url"] | "";
+  out.md5 = f["md5_hash"] | "";
+  out.size = f["file_size"] | 0;
+  out.mandatory = f["mandatory"] | false;
+  out.minBattery = f["min_battery"] | -1;
+  out.minRssi = f["min_rssi"] | -999;
+
+  Serial.print("[OTA] target version=");
+  Serial.print(out.version.length() ? out.version : "NA");
+  Serial.print(" size=");
+  Serial.print(out.size);
+  Serial.print(" md5=");
+  Serial.print(out.md5.length() ? "SET" : "NA");
+  Serial.print(" min_rssi=");
+  Serial.print(out.minRssi);
+  Serial.print(" min_battery=");
+  Serial.print(out.minBattery);
+  Serial.print(" mandatory=");
+  Serial.println(out.mandatory ? "1" : "0");
+
+  if (out.version.length() == 0 || out.url.length() == 0) {
+    return true;
+  }
+  if (chairOut.currentFirmware.length() > 0 && otaCompareVersions(out.version, chairOut.currentFirmware) <= 0) {
+    Serial.println("[OTA] target <= current_firmware (no update)");
+    return true;
+  }
+  if (otaCompareVersions(out.version, FIRMWARE_VERSION) > 0) {
+    out.available = true;
+  }
+  Serial.print("[OTA] compare fwVersion=");
+  Serial.print(FIRMWARE_VERSION);
+  Serial.print(" -> update_available=");
+  Serial.println(out.available ? "1" : "0");
+  return true;
+}
+
+static void otaUpdateChairLastUpdateCheck() {
+  String ts = getTimestamp();
+  if (ts.length() == 0 || ts == "null") return;
+  StaticJsonDocument<128> doc;
+  doc["last_update_check"] = ts;
+  String payload;
+  serializeJson(doc, payload);
+  bool ok = supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload);
+  Serial.print("[OTA] chairs.last_update_check ");
+  Serial.println(ok ? "OK" : "FAIL");
+}
+
+static void otaUpdateChairLastUpdateAttempt() {
+  String ts = getTimestamp();
+  if (ts.length() == 0 || ts == "null") return;
+  StaticJsonDocument<128> doc;
+  doc["last_update_attempt"] = ts;
+  String payload;
+  serializeJson(doc, payload);
+  bool ok = supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload);
+  Serial.print("[OTA] chairs.last_update_attempt ");
+  Serial.println(ok ? "OK" : "FAIL");
+}
+
+static String otaDeviceUpdatesInsertDownloading(const ChairOtaInfo& chair, const OtaInfo& info, const String& fromVersion) {
+  if (!chair.found || chair.id.length() == 0) return "";
+  String ts = getTimestamp();
+  if (ts.length() == 0 || ts == "null") ts = "";
+
+  StaticJsonDocument<384> doc;
+  doc["device_id"] = chair.id;
+  doc["from_version"] = fromVersion;
+  doc["to_version"] = info.version;
+  doc["status"] = "downloading";
+  doc["error_message"] = nullptr;
+  if (ts.length() > 0) doc["started_at"] = ts;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  String resp;
+  if (!supabasePostJsonResponse("/rest/v1/device_updates", payload, resp)) {
+    return "";
+  }
+
+  DynamicJsonDocument outDoc(1024);
+  DeserializationError err = deserializeJson(outDoc, resp);
+  if (!err && outDoc.is<JsonArray>() && outDoc.size() > 0) {
+    String id = outDoc[0]["id"] | "";
+    Serial.print("[OTA] device_updates downloading id=");
+    Serial.println(id.length() ? id : "NA");
+    return id;
+  }
+  return "";
+}
+
+static void otaDeviceUpdatesFinalize(const String& updateId, const String& status, const String& errorMessage, int durationSeconds, int bytesDownloaded) {
+  if (updateId.length() == 0) return;
+  String ts = getTimestamp();
+  if (ts.length() == 0 || ts == "null") ts = "";
+
+  StaticJsonDocument<384> doc;
+  doc["status"] = status;
+  if (errorMessage.length() > 0) doc["error_message"] = errorMessage;
+  else doc["error_message"] = nullptr;
+  if (ts.length() > 0) doc["completed_at"] = ts;
+  if (durationSeconds >= 0) doc["duration_seconds"] = durationSeconds;
+  if (bytesDownloaded >= 0) doc["bytes_downloaded"] = bytesDownloaded;
+
+  String payload;
+  serializeJson(doc, payload);
+  bool ok = supabasePatchJson("/rest/v1/device_updates?id=eq." + updateId, payload);
+  Serial.print("[OTA] device_updates ");
+  Serial.print(updateId);
+  Serial.print(" -> ");
+  Serial.print(status);
+  Serial.print(" ");
+  Serial.println(ok ? "OK" : "FAIL");
+}
+
+static void otaUpdateChairAfterSuccess(const OtaInfo& info) {
+  String ts = getTimestamp();
+  if (ts.length() == 0 || ts == "null") ts = "";
+
+  StaticJsonDocument<384> doc;
+  doc["current_firmware"] = info.version;
+  if (ts.length() > 0) {
+    doc["last_update"] = ts;
+    doc["last_update_check"] = ts;
+    doc["last_update_attempt"] = ts;
+  }
+  String payload;
+  serializeJson(doc, payload);
+  bool ok = supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload);
+  Serial.print("[OTA] chairs.current_firmware=");
+  Serial.print(info.version);
+  Serial.print(" ");
+  Serial.println(ok ? "OK" : "FAIL");
+}
+
+static bool otaFetchUpdateInfo(OtaInfo& out, ChairOtaInfo& chairOut) {
+  if (otaManifestUrl.length() > 0) {
+    chairOut.found = false;
+    chairOut.id = "";
+    chairOut.enabled = true;
+    chairOut.currentFirmware = "";
+    return otaFetchManifest(out);
+  }
+  return otaFetchFromSupabaseTables(out, chairOut);
+}
+
 static bool otaDownloadAndUpdate(const OtaInfo& info) {
   if (WiFi.status() != WL_CONNECTED) {
     return false;
@@ -1059,7 +1350,12 @@ static bool otaDownloadAndUpdate(const OtaInfo& info) {
     return false;
   }
 
+  uint32_t startedAtMs = millis();
   otaInProgress = true;
+  Serial.print("[OTA] START from=");
+  Serial.print(otaActiveFromVersion.length() ? otaActiveFromVersion : String(FIRMWARE_VERSION));
+  Serial.print(" to=");
+  Serial.println(info.version.length() ? info.version : "NA");
   enviarBLE("OTA:START");
   mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_START", false);
   mqttStatusDirty = true;
@@ -1086,12 +1382,17 @@ static bool otaDownloadAndUpdate(const OtaInfo& info) {
   http.addHeader("Cache-Control", "no-cache");
   http.addHeader("Connection", "close");
 
+  Serial.print("[OTA] DOWNLOAD url=");
+  Serial.println(info.url);
   int httpCode = http.GET();
   if (httpCode != HTTP_CODE_OK) {
     http.end();
     otaInProgress = false;
+    otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", String("HTTP ") + httpCode, static_cast<int>((millis() - startedAtMs) / 1000), 0);
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_HTTP", false);
     enviarBLE("OTA:FAIL");
+    Serial.print("[OTA] FAIL HTTP=");
+    Serial.println(httpCode);
     return false;
   }
 
@@ -1103,47 +1404,114 @@ static bool otaDownloadAndUpdate(const OtaInfo& info) {
   if (contentLength <= 0) {
     http.end();
     otaInProgress = false;
+    otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", "LEN", static_cast<int>((millis() - startedAtMs) / 1000), 0);
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_LEN", false);
     enviarBLE("OTA:FAIL");
+    Serial.println("[OTA] FAIL LEN");
     return false;
   }
 
+  Serial.print("[OTA] INSTALL prepare size=");
+  Serial.print(contentLength);
+  Serial.print(" md5=");
+  Serial.println(info.md5.length() ? "SET" : "NA");
   if (info.md5.length() > 0) {
     Update.setMD5(info.md5.c_str());
   }
   if (!Update.begin(contentLength)) {
     http.end();
     otaInProgress = false;
+    otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", String("BEGIN ") + Update.getError(), static_cast<int>((millis() - startedAtMs) / 1000), 0);
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_BEGIN", false);
     enviarBLE("OTA:FAIL");
+    Serial.print("[OTA] FAIL BEGIN err=");
+    Serial.println(Update.getError());
     return false;
   }
 
   WiFiClient* stream = http.getStreamPtr();
-  size_t written = Update.writeStream(*stream);
-  if (written == 0) {
+  size_t writtenTotal = 0;
+  uint32_t lastProgressMs = millis();
+  const uint32_t progressEveryMs = 1500;
+  uint8_t buf[1024];
+  while (http.connected() && static_cast<int32_t>(writtenTotal - static_cast<size_t>(contentLength)) < 0) {
+    size_t avail = stream->available();
+    if (avail == 0) {
+      delay(1);
+      continue;
+    }
+    size_t toRead = avail;
+    if (toRead > sizeof(buf)) toRead = sizeof(buf);
+    int r = stream->readBytes(buf, toRead);
+    if (r <= 0) {
+      delay(1);
+      continue;
+    }
+    size_t w = Update.write(buf, static_cast<size_t>(r));
+    writtenTotal += w;
+    if (w != static_cast<size_t>(r)) {
+      Update.abort();
+      http.end();
+      otaInProgress = false;
+      otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", String("WRITE_MISMATCH ") + Update.getError(), static_cast<int>((millis() - startedAtMs) / 1000), static_cast<int>(writtenTotal));
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_WRITE", false);
+      enviarBLE("OTA:FAIL");
+      Serial.print("[OTA] FAIL WRITE_MISMATCH err=");
+      Serial.println(Update.getError());
+      return false;
+    }
+    uint32_t now = millis();
+    if ((now - lastProgressMs) >= progressEveryMs) {
+      lastProgressMs = now;
+      int pct = (contentLength > 0) ? static_cast<int>((writtenTotal * 100ULL) / static_cast<uint64_t>(contentLength)) : 0;
+      Serial.print("[OTA] DOWNLOADING ");
+      Serial.print(pct);
+      Serial.print("% (");
+      Serial.print(static_cast<uint32_t>(writtenTotal));
+      Serial.print("/");
+      Serial.print(contentLength);
+      Serial.println(")");
+    }
+  }
+
+  if (writtenTotal == 0) {
     Update.abort();
     http.end();
     otaInProgress = false;
+    otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", String("WRITE ") + Update.getError(), static_cast<int>((millis() - startedAtMs) / 1000), 0);
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_WRITE", false);
     enviarBLE("OTA:FAIL");
+    Serial.print("[OTA] FAIL WRITE err=");
+    Serial.println(Update.getError());
     return false;
   }
+  Serial.print("[OTA] DOWNLOADED bytes=");
+  Serial.println(static_cast<uint32_t>(writtenTotal));
 
   bool okEnd = Update.end();
   bool okFinished = Update.isFinished();
   http.end();
   if (!okEnd || !okFinished) {
     otaInProgress = false;
+    otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", String("END ") + Update.getError(), static_cast<int>((millis() - startedAtMs) / 1000), static_cast<int>(writtenTotal));
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_END", false);
     enviarBLE("OTA:FAIL");
+    Serial.print("[OTA] FAIL END err=");
+    Serial.print(Update.getError());
+    Serial.print(" end=");
+    Serial.print(okEnd ? "1" : "0");
+    Serial.print(" finished=");
+    Serial.println(okFinished ? "1" : "0");
     return false;
   }
 
   otaPendingVersion = info.version;
   otaSavePreferences();
+  otaUpdateChairAfterSuccess(info);
+  otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "success", "", static_cast<int>((millis() - startedAtMs) / 1000), static_cast<int>(writtenTotal));
   mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_OK_REBOOT", false);
   enviarBLE("OTA:OK");
+  Serial.println("[OTA] OK REBOOT");
   delay(2000);
   ESP.restart();
   return true;
@@ -1154,6 +1522,7 @@ static void otaValidateAfterBoot() {
     return;
   }
   if (otaPendingVersion == FIRMWARE_VERSION) {
+    otaValidatedVersionToReport = otaPendingVersion;
     otaPendingVersion = "";
     otaSavePreferences();
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_VALIDATED", false);
@@ -1162,7 +1531,7 @@ static void otaValidateAfterBoot() {
 }
 
 static void otaTick() {
-  if (!otaEnabled || otaManifestUrl.length() == 0) {
+  if (!otaEnabled) {
     return;
   }
   if (otaInProgress) {
@@ -1173,17 +1542,74 @@ static void otaTick() {
   }
   uint32_t now = millis();
   if (otaNextCheckAtMs == 0) {
-    otaNextCheckAtMs = now + 30000;
+    otaNextCheckAtMs = now + 5000;
     return;
   }
   if (now < otaNextCheckAtMs) {
     return;
   }
   otaNextCheckAtMs = now + (otaIntervalSec * 1000UL);
-  OtaInfo info;
-  if (otaFetchManifest(info) && info.available) {
-    otaDownloadAndUpdate(info);
+
+  Serial.println("[OTA] CHECK");
+
+  if (otaValidatedVersionToReport.length() > 0) {
+    String ts = getTimestamp();
+    StaticJsonDocument<256> doc;
+    doc["current_firmware"] = otaValidatedVersionToReport;
+    doc["last_update"] = ts;
+    String payload;
+    serializeJson(doc, payload);
+    supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload);
+    otaValidatedVersionToReport = "";
   }
+
+  otaUpdateChairLastUpdateCheck();
+
+  OtaInfo info;
+  ChairOtaInfo chair;
+  if (otaFetchUpdateInfo(info, chair)) {
+    if (chair.found && !chair.enabled) {
+      Serial.println("[OTA] SKIP (chair disabled)");
+      return;
+    }
+    if (info.available) {
+      int rssi = WiFi.RSSI();
+      if (info.minRssi > -200 && rssi < info.minRssi) {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_SKIP_RSSI", false);
+        Serial.print("[OTA] SKIP RSSI rssi=");
+        Serial.print(rssi);
+        Serial.print(" min=");
+        Serial.println(info.minRssi);
+        return;
+      }
+      int bat = otaGetBatteryPercent();
+      if (info.minBattery > 0 && bat >= 0 && bat < info.minBattery) {
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_SKIP_BAT", false);
+        Serial.print("[OTA] SKIP BAT bat=");
+        Serial.print(bat);
+        Serial.print(" min=");
+        Serial.println(info.minBattery);
+        return;
+      }
+
+      otaUpdateChairLastUpdateAttempt();
+      otaActiveFromVersion = chair.currentFirmware.length() > 0 ? chair.currentFirmware : String(FIRMWARE_VERSION);
+      otaActiveToVersion = info.version;
+      otaActiveDeviceUpdateId = otaDeviceUpdatesInsertDownloading(chair, info, otaActiveFromVersion);
+      Serial.print("[OTA] APPLY from=");
+      Serial.print(otaActiveFromVersion);
+      Serial.print(" to=");
+      Serial.println(otaActiveToVersion);
+      bool ok = otaDownloadAndUpdate(info);
+      if (!ok) {
+        otaActiveDeviceUpdateId = "";
+        otaActiveFromVersion = "";
+        otaActiveToVersion = "";
+      }
+      return;
+    }
+  }
+  Serial.println("[OTA] NO_UPDATE");
 }
 
 static bool mqttIsControlCommand(const String& cmdUpper) {
@@ -3901,9 +4327,14 @@ void executaComandoBluetooth(String cmd, const char* origin) {
   }
   if (cmd == "OTA_CHECK") {
     OtaInfo info;
-    bool ok = otaFetchManifest(info);
+    ChairOtaInfo chair;
+    bool ok = otaFetchUpdateInfo(info, chair);
     if (!ok) {
       enviarBLE("OTA:CHECK:FAIL");
+      return;
+    }
+    if (chair.found && !chair.enabled) {
+      enviarBLE("OTA:DISABLED");
       return;
     }
     if (!info.available) {
@@ -5963,7 +6394,10 @@ void executaCalibracao() {
   incoder_virtual_asento_service = 0;
   incoder_virtual_perneira_service = 0;
   pulses_encosto = pulses_assento = pulses_perneira = 0;
+  pulses_trend = 0;
   last_pulses_encosto = last_pulses_assento = last_pulses_perneira = 0;
+  last_pulses_trend = 0;
+  last_pulses_trend_travel = 0;
   contador2 = 0;
   cont = 1;
   executa_vz();
@@ -5973,21 +6407,43 @@ void executaCalibracao() {
   setOutputPin(Rele_SA, false, "CAL");
   setOutputPin(Rele_DP, false, "CAL");
   setOutputPin(Rele_SP, false, "CAL");
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "CAL");
   delay(200);
   Serial.println("Subindo todos os eixos ate limite (aprendizado)...");
   unsigned long start = millis();
-  bool doneEnc = false, doneAss = false, donePer = false;
-  bool errEnc = false, errAss = false, errPer = false;
-  bool sawEnc = false, sawAss = false, sawPer = false;
-  unsigned long lastChangeEnc = millis(), lastChangeAss = millis(), lastChangePer = millis();
-  unsigned long startEnc = millis(), startAss = millis(), startPer = millis();
+  bool doneEnc = false, doneAss = false, donePer = false, doneTrend = false;
+  bool errEnc = false, errAss = false, errPer = false, errTrend = false;
+  bool sawEnc = false, sawAss = false, sawPer = false, sawTrend = false;
+  unsigned long lastChangeEnc = millis(), lastChangeAss = millis(), lastChangePer = millis(), lastChangeTrend = millis();
+  unsigned long startEnc = 0, startAss = 0, startPer = 0, startTrend = 0;
   uint32_t startPulseEnc = pulses_encosto, startPulseAss = pulses_assento, startPulsePer = pulses_perneira;
+  uint32_t startPulseTrend = pulses_trend;
   uint32_t prevPulseEnc = startPulseEnc, prevPulseAss = startPulseAss, prevPulsePer = startPulsePer;
+  uint32_t prevPulseTrend = startPulseTrend;
+  startEnc = millis();
+  lastChangeEnc = startEnc;
   setOutputPin(Rele_DE, true, "CAL");
+  delay(1000);
+  startAss = millis();
+  lastChangeAss = startAss;
   setOutputPin(Rele_SA, true, "CAL");
+  delay(1000);
+  startPer = millis();
+  lastChangePer = startPer;
   setOutputPin(Rele_SP, true, "CAL");
-  while (!(doneEnc && doneAss && donePer) && (millis() - start) < 30000) {
-    uint32_t pe = pulses_encosto, pa = pulses_assento, pp = pulses_perneira;
+  delay(1000);
+  if (Rele_TREND_SOBE >= 0) {
+    startTrend = millis();
+    lastChangeTrend = startTrend;
+    setOutputPin(Rele_TREND_SOBE, true, "CAL");
+  } else {
+    doneTrend = true;
+  }
+
+  uint32_t maxTrend = 0;
+  while (!(doneEnc && doneAss && donePer && doneTrend) && (millis() - start) < 30000) {
+    uint32_t pe = pulses_encosto, pa = pulses_assento, pp = pulses_perneira, pt = pulses_trend;
     contagem_tempo_incoder_virtual();
     if (!doneEnc) {
       if (pe != prevPulseEnc) {
@@ -6043,13 +6499,34 @@ void executaCalibracao() {
         Serial.print("Perneira max = "); Serial.println(incoder_virtual_perneira_service);
       }
     }
+    if (!doneTrend) {
+      if (pt != prevPulseTrend) {
+        lastChangeTrend = millis();
+        sawTrend = true;
+        prevPulseTrend = pt;
+        maxTrend = pt;
+      }
+      if ((millis() - startTrend > 2000) && !sawTrend) {
+        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
+        doneTrend = true;
+        errTrend = true;
+        for (int i=0;i<3;i++){ bip(); delay(120);} delay(200); for (int i=0;i<3;i++){ bip(); delay(120);}
+        Serial.println("[ERRO CAL] Trend: sem pulsos do encoder. Verifique ligacao.");
+      } else if (sawTrend && millis() - lastChangeTrend > 500) {
+        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
+        doneTrend = true;
+        Serial.print("Trend max = "); Serial.println(maxTrend);
+      }
+    }
     delay(10);
   }
   setOutputPin(Rele_DE, false, "CAL");
   setOutputPin(Rele_SA, false, "CAL");
   setOutputPin(Rele_SP, false, "CAL");
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "CAL");
   calibrationInProgress = false;
-  if (errEnc || errAss || errPer) {
+  if (errEnc || errAss || errPer || errTrend) {
     Serial.println("[ERRO CAL] Calibracao incompleta. Pelo menos um encoder nao gerou pulsos.");
     for (int i=0;i<5;i++){ bip(); delay(120);}
   } else {
@@ -6058,6 +6535,7 @@ void executaCalibracao() {
     p.putInt("encosto_max", incoder_virtual_encosto_service);
     p.putInt("assento_max", incoder_virtual_asento_service);
     p.putInt("perneira_max", incoder_virtual_perneira_service);
+    p.putUInt("trend_max", maxTrend);
     p.putBool("cal_done", true);
     p.end();
     fim_encosto_encoder = incoder_virtual_encosto_service;
