@@ -79,7 +79,7 @@ static const int IO_PCF_BASE = 100;
 #endif
 
 #ifndef TREND_INPUT_MODE
-#define TREND_INPUT_MODE INPUT
+#define TREND_INPUT_MODE INPUT_PULLDOWN
 #endif
 
 #ifndef PIN_TREN_INT_SOBE
@@ -2255,6 +2255,7 @@ const int DA = PCF_PIN(7);
 const int SA = PIN_SA;
 const int RF = PIN_RF;
 int GAVETA = PIN_GAVETA;
+static int gavetaIdleLevel = -1;
 const int ENCODER1 = PIN_ENCODER1;
 const int ENCODER2 = PIN_ENCODER2;
 const int ENCODER3 = PIN_ENCODER3;
@@ -2290,14 +2291,20 @@ static bool isGavetaAberta() {
   if (GAVETA < 0) {
     return false;
   }
-  return digitalRead(GAVETA) == LOW;
+  if (gavetaIdleLevel == -1) {
+    return digitalRead(GAVETA) == LOW;
+  }
+  return digitalRead(GAVETA) != gavetaIdleLevel;
 }
 
 static bool isGavetaAbertaRaw() {
   if (GAVETA < 0) {
     return false;
   }
-  return digitalRead(GAVETA) == LOW;
+  if (gavetaIdleLevel == -1) {
+    return digitalRead(GAVETA) == LOW;
+  }
+  return digitalRead(GAVETA) != gavetaIdleLevel;
 }
 
 extern int fim_encosto_encoder;
@@ -3092,8 +3099,10 @@ void setup() {
     pinMode(GAVETA, INPUT_PULLUP);
     Serial.print("[GAVETA] GPIO=");
     Serial.println(GAVETA);
+    gavetaIdleLevel = digitalRead(GAVETA);
   } else {
     Serial.println("[GAVETA] DESABILITADO");
+    gavetaIdleLevel = -1;
   }
   pinMode(ENCODER1, INPUT_PULLUP);
   pinMode(ENCODER2, INPUT_PULLUP);
@@ -3305,28 +3314,43 @@ static bool trendInputsConfigured() {
 }
 
 static bool trendReadDebouncedHigh(int pin, bool& initialized, bool& raw, bool& stable, uint32_t& changedAtMs) {
-  static const uint32_t TREND_DEBOUNCE_MS = 40;
+  static const uint32_t TREND_DEBOUNCE_MS = 10;
   if (pin < 0) {
     return false;
   }
+  static int8_t idleLevelByPin[49];
+  static bool idleInit = false;
+  if (!idleInit) {
+    for (size_t i = 0; i < sizeof(idleLevelByPin); i++) {
+      idleLevelByPin[i] = -1;
+    }
+    idleInit = true;
+  }
   uint32_t now = millis();
   bool cur = digitalRead(pin);
+  bool idleLevel = true;
+  if (pin >= 0 && pin < static_cast<int>(sizeof(idleLevelByPin))) {
+    if (idleLevelByPin[pin] == -1) {
+      idleLevelByPin[pin] = cur ? 1 : 0;
+    }
+    idleLevel = (idleLevelByPin[pin] != 0);
+  }
   if (!initialized) {
     initialized = true;
     raw = cur;
     stable = cur;
     changedAtMs = now;
-    return stable == HIGH;
+    return stable != idleLevel;
   }
   if (cur != raw) {
     raw = cur;
     changedAtMs = now;
   }
   if ((now - changedAtMs) < TREND_DEBOUNCE_MS) {
-    return stable == HIGH;
+    return stable != idleLevel;
   }
   stable = raw;
-  return stable == HIGH;
+  return stable != idleLevel;
 }
 
 static void trendDebugDump(const char* tag) {
@@ -3391,76 +3415,84 @@ static void trendTickInputs() {
     return;
   }
 
-  static const uint32_t TREND_GPIO_PRINT_STABLE_MS = 5;
+  static const uint32_t TREND_GPIO_PRINT_STABLE_MS = 50;
   uint32_t nowDbg = millis();
 
-  static int lastRaw39 = -1;
-  static uint32_t highSince39 = 0;
-  static bool printed39 = false;
-  if (TREN_INT_DESCE >= 0) {
-    int raw = digitalRead(TREN_INT_DESCE);
-    if (lastRaw39 == -1) lastRaw39 = raw;
-    if (raw == HIGH) {
-      if (lastRaw39 != HIGH) {
-        highSince39 = nowDbg;
-        printed39 = false;
-      }
-      if (!printed39 && highSince39 > 0 && (nowDbg - highSince39) >= TREND_GPIO_PRINT_STABLE_MS) {
-        Serial.print("GPIO ");
-        Serial.print(TREN_INT_DESCE);
-        Serial.println(" ACIONADO");
-        printed39 = true;
-      }
-    } else {
-      highSince39 = 0;
-      printed39 = false;
+  static int8_t idleLevelByPin[49];
+  static int8_t lastRawByPin[49];
+  static uint32_t activeSinceByPin[49];
+  static bool printedByPin[49];
+  static bool initByPin = false;
+  if (!initByPin) {
+    for (size_t i = 0; i < sizeof(idleLevelByPin); i++) {
+      idleLevelByPin[i] = -1;
+      lastRawByPin[i] = -1;
+      activeSinceByPin[i] = 0;
+      printedByPin[i] = false;
     }
-    lastRaw39 = raw;
+    initByPin = true;
   }
 
-  static int lastRaw8 = -1;
-  static uint32_t highSince8 = 0;
-  static bool printed8 = false;
-  if (INT_TREND_DESCE >= 0) {
-    int raw = digitalRead(INT_TREND_DESCE);
-    if (lastRaw8 == -1) lastRaw8 = raw;
-    if (raw == HIGH) {
-      if (lastRaw8 != HIGH) {
-        highSince8 = nowDbg;
-        printed8 = false;
+  auto tickAcionado = [&](int pin) {
+    if (pin < 0 || pin >= static_cast<int>(sizeof(idleLevelByPin))) {
+      return;
+    }
+    int raw = digitalRead(pin) == HIGH ? 1 : 0;
+    if (idleLevelByPin[pin] == -1) {
+      idleLevelByPin[pin] = raw;
+      lastRawByPin[pin] = raw;
+      activeSinceByPin[pin] = 0;
+      printedByPin[pin] = false;
+      return;
+    }
+    bool active = (raw != idleLevelByPin[pin]);
+    if (active) {
+      if (lastRawByPin[pin] == idleLevelByPin[pin]) {
+        activeSinceByPin[pin] = nowDbg;
+        printedByPin[pin] = false;
       }
-      if (!printed8 && highSince8 > 0 && (nowDbg - highSince8) >= TREND_GPIO_PRINT_STABLE_MS) {
+      if (!printedByPin[pin] && activeSinceByPin[pin] > 0 && (nowDbg - activeSinceByPin[pin]) >= TREND_GPIO_PRINT_STABLE_MS) {
         Serial.print("GPIO ");
-        Serial.print(INT_TREND_DESCE);
+        Serial.print(pin);
         Serial.println(" ACIONADO");
-        printed8 = true;
+        printedByPin[pin] = true;
       }
     } else {
-      highSince8 = 0;
-      printed8 = false;
+      activeSinceByPin[pin] = 0;
+      printedByPin[pin] = false;
     }
-    lastRaw8 = raw;
-  }
+    lastRawByPin[pin] = raw;
+  };
 
-  static bool init_trenUp = false, raw_trenUp = false, stable_trenUp = false;
-  static uint32_t chg_trenUp = 0;
-  static bool init_trendUp = false, raw_trendUp = false, stable_trendUp = false;
-  static uint32_t chg_trendUp = 0;
-  static bool init_trenDown = false, raw_trenDown = false, stable_trenDown = false;
-  static uint32_t chg_trenDown = 0;
-  static bool init_intDesceAsUp = false, raw_intDesceAsUp = false, stable_intDesceAsUp = false;
-  static uint32_t chg_intDesceAsUp = 0;
+  tickAcionado(TREN_INT_DESCE);
+  tickAcionado(INT_TREND_DESCE);
+  tickAcionado(TREN_INT_SOBE);
+  tickAcionado(INT_TREND_SOBE);
+  tickAcionado(GAVETA);
+
+  auto isActiveStable = [&](int pin) -> bool {
+    if (pin < 0 || pin >= static_cast<int>(sizeof(idleLevelByPin))) {
+      return false;
+    }
+    if (idleLevelByPin[pin] == -1) {
+      return false;
+    }
+    uint32_t since = activeSinceByPin[pin];
+    if (since == 0) {
+      return false;
+    }
+    return (nowDbg - since) >= TREND_GPIO_PRINT_STABLE_MS;
+  };
 
   bool hasUpPins = (TREN_INT_SOBE >= 0 || INT_TREND_SOBE >= 0);
   bool up = false;
   if (hasUpPins) {
-    up = trendReadDebouncedHigh(TREN_INT_SOBE, init_trenUp, raw_trenUp, stable_trenUp, chg_trenUp) ||
-         trendReadDebouncedHigh(INT_TREND_SOBE, init_trendUp, raw_trendUp, stable_trendUp, chg_trendUp);
+    up = isActiveStable(TREN_INT_SOBE) || isActiveStable(INT_TREND_SOBE);
   } else {
-    up = trendReadDebouncedHigh(INT_TREND_DESCE, init_intDesceAsUp, raw_intDesceAsUp, stable_intDesceAsUp, chg_intDesceAsUp);
+    up = isActiveStable(INT_TREND_DESCE);
   }
 
-  bool down = trendReadDebouncedHigh(TREN_INT_DESCE, init_trenDown, raw_trenDown, stable_trenDown, chg_trenDown);
+  bool down = isActiveStable(TREN_INT_DESCE);
 
   static bool lastConflict = false;
   bool conflict = up && down;
@@ -3482,31 +3514,48 @@ static void trendTickInputs() {
   lastConflict = false;
 
   if (up) {
-    ultimoComandoTrendSobe = millis();
-    trendLastPulseAtMs = ultimoComandoTrendSobe;
+    uint32_t now = millis();
+    ultimoComandoTrendSobe = now;
+    trendLastPulseAtMs = now;
     last_pulses_trend = pulses_trend;
-    estado_trend_sobe = true;
-    estado_trend_desce = false;
-    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_IN");
-    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, true, "TREND_IN");
-    faz_bt_seg = 1;
-    iniciaTimerMotor();
-    mqttStatusDirty = true;
-    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_UP_ON", false);
+
+    if (!estado_trend_sobe) {
+      if (estado_trend_desce) {
+        if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_IN");
+        estado_trend_desce = false;
+        mqttStatusDirty = true;
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_DOWN_OFF", false);
+      }
+      estado_trend_sobe = true;
+      if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, true, "TREND_IN");
+      faz_bt_seg = 1;
+      iniciaTimerMotor();
+      mqttStatusDirty = true;
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_UP_ON", false);
+    }
     return;
   }
+
   if (down) {
-    ultimoComandoTrendDesce = millis();
-    trendLastPulseAtMs = ultimoComandoTrendDesce;
+    uint32_t now = millis();
+    ultimoComandoTrendDesce = now;
+    trendLastPulseAtMs = now;
     last_pulses_trend = pulses_trend;
-    estado_trend_desce = true;
-    estado_trend_sobe = false;
-    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_IN");
-    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, true, "TREND_IN");
-    faz_bt_seg = 1;
-    iniciaTimerMotor();
-    mqttStatusDirty = true;
-    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_DOWN_ON", false);
+
+    if (!estado_trend_desce) {
+      if (estado_trend_sobe) {
+        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_IN");
+        estado_trend_sobe = false;
+        mqttStatusDirty = true;
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_UP_OFF", false);
+      }
+      estado_trend_desce = true;
+      if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, true, "TREND_IN");
+      faz_bt_seg = 1;
+      iniciaTimerMotor();
+      mqttStatusDirty = true;
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_DOWN_ON", false);
+    }
     return;
   }
 
@@ -4003,11 +4052,13 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     if (GAVETA >= 0) {
       pinMode(GAVETA, INPUT_PULLUP);
       lastButtonState_GAVETA = digitalRead(GAVETA);
+      gavetaIdleLevel = lastButtonState_GAVETA;
       saveGavetaPinPreference();
       Serial.print("[GAVETA] PIN=");
       Serial.println(GAVETA);
     } else {
       Serial.println("[GAVETA] DESABILITADO");
+      gavetaIdleLevel = -1;
     }
     return;
   }
