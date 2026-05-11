@@ -1,0 +1,489 @@
+
+// constants won't change. They're used here to set pin numbers INPUT'S:
+const int DE = 5;
+const int SA = 34;
+const int DA = 17;
+const int SE = 13;
+const int VZ = 22;
+const int SP = 18;
+const int DP = 19;
+const int PT = 21;
+const int RF = 23;
+
+
+// constants won't change. They're used here to set pin numbers OUTPUT'S:
+const int Rele_SA = 33;
+const int Rele_DA = 25;
+const int Rele_SE = 27;
+const int Rele_DE = 26;
+const int Rele_SP = 12;
+const int Rele_DP = 14;
+const int LED = 02;
+const int AD_PIC = 16;
+const int Rele_refletor = 4;
+const int BUZZER = 32;
+
+
+// variables will change:
+int buttonState = 0;   // variable for reading the pushbutton status
+int buttonState1 = 0;  // variable for reading the pushbutton status
+int buttonState2 = 0;  // variable for reading the pushbutton status
+int buttonState3 = 0;  // variable for reading the pushbutton status
+int buttonState4 = 0;  // variable for reading the pushbutton status
+int buttonState5 = 0;  // variable for reading the pushbutton status
+unsigned long previousMillis = 0;
+unsigned long currentMillis;
+unsigned long interval = 500;
+
+int ledState = 0;  // Estado inicial do LED
+int cont = 0;
+int contador = 0;
+bool estado_r = 0;
+bool estado_sp = 0;
+bool estado_dp = 0;
+bool estado_sa = 0;
+bool estado_da = 0;
+bool estado_se = 0;
+bool estado_de = 0;
+bool faz_bt_seg = 0;
+
+unsigned long currentMillis20 = 0;
+unsigned long previousMillis_amostra20 = 0;
+int TEMPO_prints = 15000;
+
+void setup() {
+
+  // initialize serial communication at 9600 bits per second:
+  Serial.begin(115200);
+
+  // initialize the pushbutton pin as an input:
+  pinMode(DE, INPUT_PULLUP);
+  pinMode(SA, INPUT_PULLUP);
+  pinMode(DA, INPUT_PULLUP);
+  pinMode(SE, INPUT_PULLUP);
+  pinMode(RF, INPUT_PULLUP);
+  pinMode(VZ, INPUT_PULLUP);
+  pinMode(PT, INPUT_PULLUP);
+  pinMode(SP, INPUT_PULLUP);
+  pinMode(DP, INPUT_PULLUP);
+  pinMode(AD_PIC, INPUT);
+
+
+  // initialize the LED pin as an output:
+  pinMode(Rele_SA, OUTPUT);
+  pinMode(Rele_DA, OUTPUT);
+  pinMode(Rele_SE, OUTPUT);
+  pinMode(Rele_DE, OUTPUT);
+  pinMode(Rele_DP, OUTPUT);
+  pinMode(Rele_SP, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(LED, OUTPUT);
+  pinMode(Rele_refletor, OUTPUT);
+
+
+  Serial.println("inicio programa cadeira GO");
+
+  //executa_vz();
+
+  bip();
+  delay(100);
+  bip();
+}
+
+void loop() {
+
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis > interval) {
+    previousMillis = currentMillis;
+
+    ledState = !ledState;
+    digitalWrite(LED, ledState);
+  }
+
+  Button_Seg();
+
+  Button_geral();
+
+  monitora_tempo_rele();
+}
+
+//-----------------------------------------------------------Button_geral-------------------------------------------------------------------------
+void monitora_tempo_rele() {
+
+  buttonState = digitalRead(DE);
+  buttonState1 = digitalRead(SE);
+  buttonState2 = digitalRead(SA);
+  buttonState3 = digitalRead(DA);
+  buttonState4 = digitalRead(DP);
+  buttonState5 = digitalRead(DP);
+
+
+  if (buttonState == HIGH || buttonState1 == HIGH || buttonState2 == HIGH || buttonState3 == HIGH || buttonState4 == HIGH || buttonState5 == HIGH) {
+
+    delay(1);
+    contador++;
+
+    if (contador >= 30000) {
+
+      AT_SEG();
+      contador = 0;
+    }
+  }
+}
+//-----------------------------------------------------------Button_geral-------------------------------------------------------------------------
+void Button_Seg() {
+
+  buttonState = digitalRead(DE);
+  if (buttonState == LOW) {
+
+    AT_SEG();
+  }
+
+  buttonState = digitalRead(SE);
+  if (buttonState == LOW) {
+
+    AT_SEG();
+  }
+
+  buttonState = digitalRead(DA);
+  if (buttonState == LOW) {
+
+    AT_SEG();
+  }
+
+  buttonState = digitalRead(SA);
+  if (buttonState == LOW) {
+
+    AT_SEG();
+  }
+
+  buttonState = digitalRead(VZ);
+  if (buttonState == LOW) {
+
+    AT_SEG();
+  }
+
+  buttonState = digitalRead(RF);
+  if (buttonState == LOW) {
+
+    AT_SEG();
+  }
+
+  buttonState = digitalRead(SP);
+  if (buttonState == LOW) {
+
+    AT_SEG();
+  }
+
+  buttonState = digitalRead(DP);
+  if (buttonState == LOW) {
+
+    AT_SEG();
+  }
+
+  buttonState = digitalRead(PT);
+  if (buttonState == LOW) {
+
+    AT_SEG();
+  }
+}
+//-----------------------------------------------------------Button_geral-------------------------------------------------------------------------
+void Button_geral() {
+
+  if (faz_bt_seg == 0) {
+
+    buttonState = digitalRead(RF);
+    if (buttonState == LOW) {
+
+
+      estado_r = !estado_r;
+      digitalWrite(Rele_refletor, estado_r);
+      Serial.println("botao rf aciaonado");
+
+      buttonState = digitalRead(RF);
+      while (buttonState == LOW) {
+
+        buttonState = digitalRead(RF);
+      }
+    }
+
+
+    buttonState = digitalRead(Rele_refletor);
+    if (buttonState == LOW) {
+
+      faz_bt_seg = 1;
+    }
+
+    //---------------------------------
+    buttonState = digitalRead(SP);
+    if (buttonState == LOW) {
+
+      buttonState = digitalRead(SP);
+      estado_sp = !estado_sp;
+      digitalWrite(Rele_SP, estado_sp);
+      Serial.println("botao sp aciaonado 1 x");
+
+      buttonState = digitalRead(SP);
+      while (buttonState == LOW) {
+
+        buttonState = digitalRead(SP);
+        Serial.println("botao sp aciaonado");
+      }
+    }
+
+    buttonState = digitalRead(Rele_SP);
+    if (buttonState == LOW) {
+
+      faz_bt_seg = 1;
+    }
+
+    //---------------------------------
+    buttonState = digitalRead(DP);
+    if (buttonState == LOW) {
+
+      estado_dp = !estado_dp;
+      digitalWrite(Rele_DP, estado_dp);
+      Serial.println("botao dp aciaonado");
+
+      buttonState = digitalRead(DP);
+      while (buttonState == LOW) {
+
+        buttonState = digitalRead(DP);
+      }
+    }
+
+    buttonState = digitalRead(Rele_DP);
+    if (buttonState == LOW) {
+
+      faz_bt_seg = 1;
+    }
+
+    //---------------------------------
+    buttonState = digitalRead(DE);
+    if (buttonState == LOW) {
+
+      estado_de = !estado_de;
+      digitalWrite(Rele_DE, estado_de);
+      Serial.println("botao DE aciaonado");
+
+      buttonState = digitalRead(DE);
+      while (buttonState == LOW) {
+
+        buttonState = digitalRead(DE);
+      }
+    }
+
+    buttonState = digitalRead(Rele_DE);
+    if (buttonState == LOW) {
+
+      faz_bt_seg = 1;
+    }
+
+    //---------------------------------
+    buttonState = digitalRead(SE);
+    if (buttonState == LOW) {
+
+      estado_se = !estado_se;
+      digitalWrite(Rele_SE, estado_se);
+      Serial.println("botao SE aciaonado");
+
+      buttonState = digitalRead(SE);
+      while (buttonState == LOW) {
+
+        buttonState = digitalRead(SE);
+      }
+    }
+
+    buttonState = digitalRead(Rele_SE);
+    if (buttonState == LOW) {
+
+      faz_bt_seg = 1;
+    }
+
+    buttonState = digitalRead(SA);
+    if (buttonState == LOW) {
+
+      estado_sa = !estado_sa;
+      digitalWrite(Rele_SA, estado_sa);
+      Serial.println("botao SA aciaonado");
+
+      buttonState = digitalRead(SA);
+      while (buttonState == LOW) {
+
+        buttonState = digitalRead(SA);
+      }
+    }
+
+    buttonState = digitalRead(Rele_SA);
+    if (buttonState == LOW) {
+
+      faz_bt_seg = 1;
+    }
+
+    buttonState = digitalRead(DA);
+    if (buttonState == LOW) {
+
+      estado_da = !estado_da;
+      digitalWrite(Rele_DA, estado_da);
+      Serial.println("botao DA aciaonado");
+
+
+      buttonState = digitalRead(DA);
+      while (buttonState == LOW) {
+
+        buttonState = digitalRead(DA);
+      }
+    }
+
+    buttonState = digitalRead(Rele_DA);
+    if (buttonState == LOW) {
+
+      faz_bt_seg = 1;
+    }
+
+    //---------------------------------
+    buttonState = digitalRead(VZ);
+    if (buttonState == LOW) {
+
+      Serial.println("botao vz aciaonado");
+
+      cont = 1;
+      executa_vz();
+
+      buttonState = digitalRead(VZ);
+      while (buttonState == LOW) {
+
+        buttonState = digitalRead(VZ);
+      }
+    }
+
+    buttonState = digitalRead(PT);
+    if (buttonState == LOW) {
+
+      Serial.println("botao pt aciaonado");
+      cont = 1;
+      executa_pt();
+
+      buttonState = digitalRead(PT);
+      while (buttonState == LOW) {
+
+        buttonState = digitalRead(PT);
+      }
+    }
+
+    delay(100);
+  }
+}
+//--------------------------------------------------------------executa_vz-------------------------------------------------------------------------------------
+void executa_vz(void) {
+
+  Serial.println(" VZ acionado");
+
+  bip();
+
+  digitalWrite(Rele_DA, HIGH);
+  delay(250);
+  digitalWrite(Rele_SE, HIGH);
+  delay(250);
+  digitalWrite(Rele_DP, HIGH);
+
+  while (cont == 1) {
+
+    delay(1);
+    Button_geral();
+    Button_Seg();
+    contador++;
+
+    Serial.println("executando VZ");
+
+    if (contador >= 15000) {
+
+      digitalWrite(Rele_DA, LOW);
+      digitalWrite(Rele_SE, LOW);
+      digitalWrite(Rele_DP, LOW);
+      cont = 0;
+      contador = 0;
+
+
+      bip();
+      faz_bt_seg = 0;
+      Serial.println("fim ------------------------------ VZ");
+    }
+  }
+}
+
+//--------------------------------------------------------------executa_pt-------------------------------------------------------------------------------------
+void executa_pt() {
+
+  Serial.println(" PT acionado");
+
+  bip();
+
+  digitalWrite(Rele_SA, HIGH);
+  delay(250);
+  digitalWrite(Rele_DE, HIGH);
+  delay(250);
+  digitalWrite(Rele_SP, HIGH);
+
+  while (cont == 1) {
+
+    delay(1);
+    Button_geral();
+    Button_Seg();
+    contador++;
+
+    Serial.println("executando PT");
+
+    if (contador >= 15000) {
+
+      digitalWrite(Rele_SA, LOW);
+      digitalWrite(Rele_DE, LOW);
+      digitalWrite(Rele_SP, LOW);
+      cont = 0;
+      contador = 0;
+
+
+      bip();
+      faz_bt_seg = 0;
+      Serial.println("fim ------------------------------ PT");
+    }
+  }
+}
+
+//-----------------------------------------------------------AT_SEG-------------------------------------------------------------------------
+void AT_SEG() {
+
+  Serial.println("entro rotina at_seg");
+
+
+  if (faz_bt_seg == 1) {
+
+    Serial.println("entro rotina at_seg if_faz_bet_seg");
+
+
+    digitalWrite(Rele_DE, LOW);
+
+    digitalWrite(Rele_SE, LOW);
+
+    digitalWrite(Rele_SA, LOW);
+
+    digitalWrite(Rele_DA, LOW);
+
+    digitalWrite(Rele_SP, LOW);
+
+    digitalWrite(Rele_DP, LOW);
+
+    faz_bt_seg = 0;
+
+    cont = 0;
+  }
+  delay(100);
+}
+
+//-----------------------------------------------------------BIP-------------------------------------------------------------------------
+void bip() {
+
+  digitalWrite(BUZZER, HIGH);
+  delay(100);
+  digitalWrite(BUZZER, LOW);
+}

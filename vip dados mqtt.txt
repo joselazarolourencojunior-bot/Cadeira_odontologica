@@ -1,0 +1,111 @@
+ID do Cliente: viphospitalar@gmail.com
+
+Usuário: VIPMESAHOSPITALAR
+
+Senha: SvaXEVCm-PtdudoFK
+
+TLS/SSL: habilitado (porta 8883)
+
+Simples: habilitado (porta 1883) -- não recomendado
+
+API HTTPS: 443 ( https://support.asplhosting.com/t/rest-api-to-manage-myqtthub-service )
+
+--== SUPORTE DA COMUNIDADE E FÓRUM ==--
+
+Painel: https://support.asplhosting.com/c/myqtthub-en
+
+Usuário: VIPMESAHOSPITALAR (ou envie um e-mail para viphospitalar@gmail.com)
+
+Senha: SvaXEVCm-PtdudoFK
+
+Use o fórum e o suporte da comunidade
+(https://support.asplhosting.com/c/myqtthub-en) como sua principal
+fonte de suporte.
+
+--== PAINEL PAS (plataforma de assinatura e gerenciamento, faturamento) ==--
+
+Painel: https://pas.aspl.es
+
+Usuário: VIPMESAHOSPITALAR
+
+Senha: <Senha configurada no seu registro>
+
+--== PRIMEIROS PASSOS ==--
+
+Acesse a página a seguir para obter informações sobre por onde
+começar, como criar seus dispositivos, etc.:
+
+https://support.asplhosting.com/t/myqtthub-en-start-here
+
+-- NOTA IMPORTANTE: copie esta mensagem para um local seguro. Por motivos de segurança,
+a PAS removerá esta mensagem após 1 mês.
+
+Esperamos que você goste do MyQttHub.com.
+Sua equipe ASPLhosting e MyQttHub.com.
+
+https://asplhosting.com
+
+
+
+MQTT_PASS=<SvaXEVCm-PtdudoFK>
+MQTT_STATUS
+
+
+static const String _brokerUrl = 'node02.myqtthub.com';
+  static const int _port = 8883;
+  static const String _clientId =
+      'Flutter-Chair-App'; // Changed from ESP32-{SERIAL} to app specific
+  static const String _username = 'VIPMESAHOSPITALAR';
+  static const String _password = 'SvaXEVCm-PtdudoFK';
+
+  // Tópicos MQTT - usando serial da cadeira
+  String get _commandTopic =>
+      'CADEIRA-${_settingsService.settings.chairSerial}/command';
+  String get _statusTopic =>
+      'CADEIRA-${_settingsService.settings.chairSerial}/status';
+
+
+
+
+
+
+
+
+- Broker/Host: broker.emqx.io
+- Porta (TCP): 1883
+- TLS/SSL: desligado
+- Username: (vazio)
+- Password: (vazio)
+- ClientId: APP-CADEIRA-D83BDA4CF344 (não use o mesmo do ESP32)
+- Clean session: true
+Tópicos (igual no ESP32):
+
+- Comando: CADEIRA-D83BDA4CF344/command
+- Status: CADEIRA-D83BDA4CF344/status
+
+
+
+
+
+
+Credenciais / parâmetros MQTT (deste app)
+
+- Broker: test.mosquitto.org
+- Porta TCP (sem TLS): 1883
+- Usuário/Senha: não usa
+- ClientId: APP-CADEIRA-<SERIAL>-<timestamp> (único)
+- Tópicos que o app recebe (RX):
+  - CADEIRA-<SERIAL>/status
+  - CADEIRA-<SERIAL>/command
+
+
+
+
+
+
+
+
+
+
+
+

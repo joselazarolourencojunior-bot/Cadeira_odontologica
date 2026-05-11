@@ -23,34 +23,12 @@
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <Wire.h>
-#include <new>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <freertos/queue.h>
 #include <esp_idf_version.h>
 #include <esp_task_wdt.h>
-#include "soc/soc.h"
-#include "soc/rtc_cntl_reg.h"
-
-// Flag para detectar queda de energia
-volatile bool powerFailDetected = false;
-
-// ISR para o Brownout Detector
-void IRAM_ATTR brownout_isr(void *arg) {
-  powerFailDetected = true;
-}
-
-// Configura o Brownout Detector para gerar interrupção em vez de reset imediato
-void setupBrownoutDetector() {
-  // Nota: Para que o salvamento funcione durante a queda, sua fonte deve ter
-  // capacitores grandes o suficiente para manter o ESP ligado por ~50ms 
-  // após o trigger do brownout.
-  
-  // Se você tiver um pino monitorando a tensão da rede (ex: divisor de tensão),
-  // defina-o aqui para uma detecção muito mais rápida e segura:
-  // #define PIN_POWER_SENSE 34 
-}
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(ARDUINO_ESP32S2_DEV) || defined(ARDUINO_ESP32S2)
 #define HAS_BLE 0
@@ -99,18 +77,6 @@ static const int IO_PCF_BASE = 100;
 #define PIN_INT_TREND_DESCE -1
 #endif
 
-#ifndef TREND_INPUT_MODE
-#define TREND_INPUT_MODE INPUT_PULLDOWN
-#endif
-
-#ifndef PIN_TREN_INT_SOBE
-#define PIN_TREN_INT_SOBE -1
-#endif
-
-#ifndef PIN_INT_TREND_SOBE
-#define PIN_INT_TREND_SOBE -1
-#endif
-
 #ifndef PIN_ENCODER1
 #define PIN_ENCODER1 -1
 #endif
@@ -121,10 +87,6 @@ static const int IO_PCF_BASE = 100;
 
 #ifndef PIN_ENCODER3
 #define PIN_ENCODER3 -1
-#endif
-
-#ifndef PIN_ENCODER_TREND
-#define PIN_ENCODER_TREND 46
 #endif
 
 #ifndef I2C_EARLY_TEST
@@ -148,7 +110,7 @@ static const int IO_PCF_BASE = 100;
 #endif
 
 #ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "0.0.1"
+#define FIRMWARE_VERSION "0.0.0"
 #endif
 
 static bool i2cPing(uint8_t address) {
@@ -218,10 +180,8 @@ extern bool lastButtonState_GAVETA;
 
 static void processaComandosSerialDebug() {
   static String serialCmd;
-  static uint32_t lastRxAtMs = 0;
   while (Serial.available() > 0) {
     char c = static_cast<char>(Serial.read());
-    lastRxAtMs = millis();
     if (c == '\n' || c == '\r') {
       if (serialCmd.length() > 0) {
         String cmd = serialCmd;
@@ -233,14 +193,6 @@ static void processaComandosSerialDebug() {
     }
     if (serialCmd.length() < 64) {
       serialCmd += c;
-    }
-  }
-  if (serialCmd.length() > 0 && lastRxAtMs > 0 && (millis() - lastRxAtMs) > 150) {
-    String cmd = serialCmd;
-    serialCmd = "";
-    cmd.trim();
-    if (cmd.length() > 0) {
-      executaComandoBluetooth(cmd, "SERIAL");
     }
   }
 }
@@ -291,7 +243,7 @@ static void pcf8574PrintStatus(uint8_t in) {
   Serial.println("--------------------------------");
 }
 
-static void pcf8574ReportChanges(uint8_t oldIn, uint8_t newIn, const char* tag) {
+static void pcf8574ReportChanges(uint8_t oldIn, uint8_t newIn) {
   uint8_t diff = static_cast<uint8_t>(oldIn ^ newIn);
   if (diff == 0) {
     return;
@@ -300,11 +252,7 @@ static void pcf8574ReportChanges(uint8_t oldIn, uint8_t newIn, const char* tag) 
     if ((diff & (1U << p)) == 0) {
       continue;
     }
-    if (tag && tag[0] != '\0') {
-      Serial.print(tag);
-      Serial.print(" ");
-    }
-    Serial.print("P");
+    Serial.print("[PCF8574_INT] P");
     Serial.print(p);
     Serial.print("(");
     Serial.print(pcf8574PinLabel(p));
@@ -315,114 +263,6 @@ static void pcf8574ReportChanges(uint8_t oldIn, uint8_t newIn, const char* tag) 
   pcf8574PrintStatus(newIn);
 }
 #endif
-
-extern const int SA;
-extern const int RF;
-extern int GAVETA;
-extern const int TREN_INT_DESCE;
-extern const int TREN_INT_SOBE;
-extern const int INT_TREND_DESCE;
-extern const int INT_TREND_SOBE;
-
-static bool inputsDebugEnabled = false;
-static uint32_t inputsDebugLastPollMs = 0;
-static int lastGpioSa = -1;
-static int lastGpioRf = -1;
-static int lastGpioGaveta = -1;
-static int lastGpioTrendInDesce = -1;
-static int lastGpioTrendInSobe = -1;
-static int lastGpioIntTrendDesce = -1;
-static int lastGpioIntTrendSobe = -1;
-static int lastGpioPcfInt = -1;
-#if USE_PCF8574
-static uint8_t inputsDebugLastPcf = 0xFF;
-static uint32_t inputsDebugLastIrqCount = 0;
-#endif
-
-static void inputsDebugTick() {
-  if (!inputsDebugEnabled) {
-    return;
-  }
-  uint32_t now = millis();
-  if ((now - inputsDebugLastPollMs) < 100) {
-    return;
-  }
-  inputsDebugLastPollMs = now;
-
-  int sa = digitalRead(SA);
-  int rf = digitalRead(RF);
-  int gav = (GAVETA >= 0 ? digitalRead(GAVETA) : HIGH);
-  int tinD = (TREN_INT_DESCE >= 0 ? digitalRead(TREN_INT_DESCE) : HIGH);
-  int tinS = (TREN_INT_SOBE >= 0 ? digitalRead(TREN_INT_SOBE) : HIGH);
-  int intD = (INT_TREND_DESCE >= 0 ? digitalRead(INT_TREND_DESCE) : HIGH);
-  int intS = (INT_TREND_SOBE >= 0 ? digitalRead(INT_TREND_SOBE) : HIGH);
-  int pcfInt = (PCF8574_INT_PIN >= 0 ? digitalRead(static_cast<uint8_t>(PCF8574_INT_PIN)) : HIGH);
-
-  if (sa != lastGpioSa || rf != lastGpioRf || gav != lastGpioGaveta ||
-      tinD != lastGpioTrendInDesce || tinS != lastGpioTrendInSobe ||
-      intD != lastGpioIntTrendDesce || intS != lastGpioIntTrendSobe ||
-      pcfInt != lastGpioPcfInt) {
-    Serial.print("[IN_DBG] SA=");
-    Serial.print(sa == HIGH ? "1" : "0");
-    Serial.print(" RF=");
-    Serial.print(rf == HIGH ? "1" : "0");
-    Serial.print(" GAVETA=");
-    Serial.print((GAVETA >= 0) ? (gav == HIGH ? "1" : "0") : "NA");
-    Serial.print(" TREN_D=");
-    Serial.print((TREN_INT_DESCE >= 0) ? (tinD == HIGH ? "1" : "0") : "NA");
-    Serial.print(" TREN_S=");
-    Serial.print((TREN_INT_SOBE >= 0) ? (tinS == HIGH ? "1" : "0") : "NA");
-    Serial.print(" INT_D=");
-    Serial.print((INT_TREND_DESCE >= 0) ? (intD == HIGH ? "1" : "0") : "NA");
-    Serial.print(" INT_S=");
-    Serial.print((INT_TREND_SOBE >= 0) ? (intS == HIGH ? "1" : "0") : "NA");
-    Serial.print(" PCF_INT=");
-    Serial.println((PCF8574_INT_PIN >= 0) ? (pcfInt == HIGH ? "1" : "0") : "NA");
-
-    lastGpioSa = sa;
-    lastGpioRf = rf;
-    lastGpioGaveta = gav;
-    lastGpioTrendInDesce = tinD;
-    lastGpioTrendInSobe = tinS;
-    lastGpioIntTrendDesce = intD;
-    lastGpioIntTrendSobe = intS;
-    lastGpioPcfInt = pcfInt;
-  }
-
-#if USE_PCF8574
-  if (pcf8574Available) {
-    uint32_t irqCountSnapshot = pcf8574InterruptCount;
-    if (pcf8574UseInterrupt && (pcf8574InterruptPending || irqCountSnapshot != inputsDebugLastIrqCount)) {
-      Serial.print("[PCF8574_IRQ] CNT=");
-      Serial.print(static_cast<uint32_t>(irqCountSnapshot));
-      Serial.print(" LEVEL=");
-      if (PCF8574_INT_PIN >= 0) {
-        Serial.println(digitalRead(static_cast<uint8_t>(PCF8574_INT_PIN)) == HIGH ? "1" : "0");
-      } else {
-        Serial.println("NA");
-      }
-      inputsDebugLastIrqCount = irqCountSnapshot;
-
-      bool okRead = false;
-      uint8_t in = pcf8574ReadByte(static_cast<uint8_t>(PCF8574_ADDRESS), &okRead);
-      if (okRead) {
-        pcf8574ReportChanges(inputsDebugLastPcf, in, "[PCF8574]");
-        inputsDebugLastPcf = in;
-      } else {
-        Serial.println("[PCF8574] READ FAIL");
-      }
-      pcf8574InterruptPending = false;
-    } else if (!pcf8574UseInterrupt) {
-      bool okRead = false;
-      uint8_t in = pcf8574ReadByte(static_cast<uint8_t>(PCF8574_ADDRESS), &okRead);
-      if (okRead && in != inputsDebugLastPcf) {
-        pcf8574ReportChanges(inputsDebugLastPcf, in, "[PCF8574]");
-        inputsDebugLastPcf = in;
-      }
-    }
-  }
-#endif
-}
 
 static inline bool IO_isPcfPin(int pin) {
   return pin >= IO_PCF_BASE;
@@ -648,17 +488,18 @@ static void IO_digitalWrite(int pin, uint8_t value) {
 
 // ========== CONFIGURAÇÕES SUPABASE ==========
 const char* SUPABASE_URL = "https://mkoqceekhnkpviixqnnk.supabase.co";
-const char* SUPABASE_KEY = "sb_publishable_HLUfLEw2UuIWjzd5LfqLkw_oaodzV7V";
 static String supabaseUrl = SUPABASE_URL;
-static String supabaseKey = SUPABASE_KEY;
+static String supabaseKey = "";
+static String supabaseChairId = "";
+static String supabaseChairFirmware = FIRMWARE_VERSION;
 const char* SENHA_AP = "12345678";                  // Senha da rede de configuração (mínimo 8 caracteres)
 // ============================================
 
-static String mqttHost = "broker.emqx.io";
-static uint16_t mqttPort = 8883;
+static String mqttHost = "test.mosquitto.org";
+static uint16_t mqttPort = 1883;
 static String mqttUser = "";
 static String mqttPass = "";
-static bool mqttUseTls = true;
+static bool mqttUseTls = false;
 static String mqttClientId = "";
 static bool mqttCleanSession = true;
 static uint32_t mqttRxCount = 0;
@@ -682,10 +523,6 @@ static String otaManifestUrl = "";
 static uint32_t otaIntervalSec = 21600;
 static uint32_t otaNextCheckAtMs = 0;
 static String otaPendingVersion = "";
-static String otaValidatedVersionToReport = "";
-static String otaActiveDeviceUpdateId = "";
-static String otaActiveFromVersion = "";
-static String otaActiveToVersion = "";
 
 typedef struct {
   bool available;
@@ -694,16 +531,7 @@ typedef struct {
   String url;
   String md5;
   int size;
-  int minBattery;
-  int minRssi;
 } OtaInfo;
-
-typedef struct {
-  bool found;
-  String id;
-  bool enabled;
-  String currentFirmware;
-} ChairOtaInfo;
 
 static inline bool mqttLockMs(uint32_t ms) {
   if (!mqttMutex) {
@@ -720,56 +548,13 @@ static inline void mqttUnlock() {
 }
 
 WiFiClient mqttPlainClient;
-static WiFiClientSecure* mqttSecureClientPtr = nullptr;
+WiFiClientSecure mqttSecureClient;
 PubSubClient mqttClient(mqttPlainClient);
-
-static inline WiFiClientSecure& mqttSecureClientRef() {
-  if (!mqttSecureClientPtr) {
-    mqttSecureClientPtr = new WiFiClientSecure();
-  }
-  return *mqttSecureClientPtr;
-}
-
-static inline void resetMqttSecureClient() {
-  if (mqttSecureClientPtr) {
-    delete mqttSecureClientPtr;
-    mqttSecureClientPtr = nullptr;
-  }
-  mqttSecureClientPtr = new WiFiClientSecure();
-}
 static bool beepNetMqttOkDone = false;
-static bool beepMqttErrorDone = false;
-static bool beepSupabaseOkDone = false;
-static uint32_t beepSupabaseErrorNextMs = 0;
-static uint32_t mqttReadyAtMs = 0;
-static bool mqttConnectEnabled = false;
-static bool mqttPostConnectPending = false;
-static bool mqttSubscribed = false;
-static uint32_t mqttPostConnectUntilMs = 0;
-static bool audibleErrorBeeps = true;
-static uint32_t bootStartedAtMs = 0;
-static uint32_t wifiOkAtMs = 0;
-static uint32_t wifiLostAtMs = 0;
-static uint32_t mqttOkAtMs = 0;
-static uint32_t mqttLostAtMs = 0;
-static uint32_t supabaseOkAtMs = 0;
-static uint32_t supabaseFailAtMs = 0;
-static uint32_t alarmNextMs = 0;
-
-static bool beepSeqActive = false;
-static uint8_t beepSeqRemaining = 0;
-static uint32_t beepSeqNextMs = 0;
-static bool beepSeqBuzzerOn = false;
-static bool beepSeqRestorePulse = false;
-static uint16_t beepSeqOnMs = 100;
-static uint16_t beepSeqOffMs = 120;
-static bool buzzerTestEnabled = false;
+static bool buzzerTestEnabled = true;
 static bool buzzerTestIsOn = false;
 static uint32_t buzzerTestNextOnMs = 0;
 static uint32_t buzzerTestOffAtMs = 0;
-static bool trendDebugEnabled = false;
-static uint32_t trendDebugNextMs = 0;
-static uint32_t trendDebugIntervalMs = 500;
 
 // Número de série único baseado no MAC ID do ESP32
 String NUMERO_SERIE_CADEIRA = "";
@@ -876,7 +661,6 @@ void executa_M1();
 void executa_pt();
 void AT_SEG();
 void bip();
-void bipLong();
 void enviarBLE(String msg);
 void verificaBotaoResetWifi();
 void resetaConfiguracoesWifi();
@@ -884,11 +668,24 @@ static void supabaseLogUsage(const char* action);
 static void supabaseCreateMaintenanceRequestIfNeeded();
 static void supabaseSaveMemoryPosition(int slot);
 static bool supabaseLoadMemoryPositionFromDb(int slot);
-static bool supabaseGetJson(const String& restPath, String& responseOut);
 static void loadMotorTravelPreferences();
 static void saveMotorTravelPreferences(bool force);
 static void sendMotorTravelToSupabaseIfNeeded();
 static bool supabaseUpsertMotorTravel();
+static bool supabasePatchJson(const String& restPath, const String& payload);
+static inline void jsonPutTimestampOrNull(JsonDocument& doc, const char* key);
+static void supabaseOtaPatchLastUpdateCheck();
+static void supabaseOtaPatchLastUpdateAttempt();
+static void supabaseOtaPatchCurrentFirmware(const String& version);
+static void supabaseOtaInsertDeviceUpdate(
+  const String& fromVersion,
+  const String& toVersion,
+  const char* status,
+  const String& errorMessage,
+  bool includeCompletedAt,
+  int durationSeconds,
+  int bytesDownloaded
+);
 static bool mqttPublish(const String& topic, const String& payload, bool retain);
 static void mqttTaskMain(void* pvParameters);
 void publicaStatusMQTT();
@@ -907,8 +704,6 @@ extern bool estado_trend_sobe;
 extern bool estado_trend_desce;
 extern const int TREN_INT_DESCE;
 extern const int INT_TREND_DESCE;
-extern const int TREN_INT_SOBE;
-extern const int INT_TREND_SOBE;
 
 // ========== FUNÇÕES MQTT ==========
 static bool mqttPublish(const String& topic, const String& payload, bool retain) {
@@ -949,13 +744,13 @@ static bool mqttEnqueuePublish(const String& topic, const String& payload, bool 
 
 static void otaLoadPreferences() {
   Preferences p;
-  if (!p.begin("ota", false)) {
+  if (!p.begin("ota", true)) {
     return;
   }
-  otaEnabled = p.isKey("enabled") ? p.getBool("enabled", true) : true;
-  otaManifestUrl = p.isKey("manifest") ? p.getString("manifest", "") : "";
-  otaIntervalSec = p.isKey("interval") ? p.getUInt("interval", 21600) : 21600;
-  otaPendingVersion = p.isKey("pending") ? p.getString("pending", "") : "";
+  otaEnabled = p.getBool("enabled", false);
+  otaManifestUrl = p.getString("manifest", "");
+  otaIntervalSec = p.getUInt("interval", 21600);
+  otaPendingVersion = p.getString("pending", "");
   p.end();
 }
 
@@ -1032,11 +827,32 @@ static bool otaParseManifestJson(const String& body, OtaInfo& out) {
   if (obj.containsKey("url")) {
     out.url = obj["url"].as<String>();
   }
+  if (obj.containsKey("download_url") && out.url.length() == 0) {
+    out.url = obj["download_url"].as<String>();
+  }
+  if (obj.containsKey("firmware_url") && out.url.length() == 0) {
+    String path = obj["firmware_url"].as<String>();
+    if (path.length() > 0) {
+      out.url = supabaseUrl + "/storage/v1/object/public/firmware-releases/" + path;
+    }
+  }
   if (obj.containsKey("md5")) {
     out.md5 = obj["md5"].as<String>();
   }
+  if (obj.containsKey("md5_hash") && out.md5.length() == 0) {
+    out.md5 = obj["md5_hash"].as<String>();
+  }
   if (obj.containsKey("size")) {
     out.size = obj["size"].as<int>();
+  }
+  if (obj.containsKey("file_size") && out.size == 0) {
+    out.size = obj["file_size"].as<int>();
+  }
+
+  if (obj.containsKey("enabled") && obj["enabled"].is<bool>()) {
+    if (!obj["enabled"].as<bool>()) {
+      out.available = false;
+    }
   }
 
   if (!out.available) {
@@ -1048,41 +864,6 @@ static bool otaParseManifestJson(const String& body, OtaInfo& out) {
     out.available = false;
   }
   return true;
-}
-
-static bool supabasePatchJson(const String& restPath, const String& payload) {
-  if (WiFi.status() != WL_CONNECTED) return false;
-  if (ESP.getFreeHeap() < 30000) return false;
-
-  WiFiClientSecure client;
-  client.setInsecure();
-
-  HTTPClient http;
-  String url = supabaseUrl + restPath;
-  if (!http.begin(client, url)) {
-    return false;
-  }
-
-  http.setTimeout(10000);
-  http.addHeader("Content-Type", "application/json");
-  if (supabaseKey.length() > 0) {
-    http.addHeader("apikey", supabaseKey);
-    http.addHeader("Authorization", String("Bearer ") + supabaseKey);
-  }
-  http.addHeader("Prefer", "return=minimal");
-
-  int httpCode = http.PATCH(payload);
-  bool ok = (httpCode == 200 || httpCode == 204);
-  if (!ok && httpCode > 0) {
-    Serial.print("[ERRO] Supabase PATCH ");
-    Serial.print(restPath);
-    Serial.print(" ");
-    Serial.print(httpCode);
-    Serial.print(" ");
-    Serial.println(http.getString());
-  }
-  http.end();
-  return ok;
 }
 
 static bool otaFetchManifest(OtaInfo& out) {
@@ -1128,249 +909,11 @@ static bool otaFetchManifest(OtaInfo& out) {
   }
   String body = http.getString();
   http.end();
-  return otaParseManifestJson(body, out);
-}
-
-static bool supabasePostJsonResponse(const String& restPath, const String& payload, String& responseOut) {
-  responseOut = "";
-  if (WiFi.status() != WL_CONNECTED) return false;
-  if (ESP.getFreeHeap() < 30000) return false;
-
-  WiFiClientSecure client;
-  client.setInsecure();
-
-  HTTPClient http;
-  String url = supabaseUrl + restPath;
-  if (!http.begin(client, url)) {
-    return false;
-  }
-
-  http.setTimeout(10000);
-  http.addHeader("Content-Type", "application/json");
-  if (supabaseKey.length() > 0) {
-    http.addHeader("apikey", supabaseKey);
-    http.addHeader("Authorization", String("Bearer ") + supabaseKey);
-  }
-  http.addHeader("Prefer", "return=representation");
-
-  int httpCode = http.POST(payload);
-  bool ok = (httpCode == 200 || httpCode == 201);
+  bool ok = otaParseManifestJson(body, out);
   if (ok) {
-    responseOut = http.getString();
-  } else if (httpCode > 0) {
-    Serial.print("[ERRO] Supabase POST ");
-    Serial.print(restPath);
-    Serial.print(" ");
-    Serial.print(httpCode);
-    Serial.print(" ");
-    Serial.println(http.getString());
+    supabaseOtaPatchLastUpdateCheck();
   }
-  http.end();
   return ok;
-}
-
-static int otaGetBatteryPercent() {
-  return -1;
-}
-
-static bool otaFetchFromSupabaseTables(OtaInfo& out, ChairOtaInfo& chairOut) {
-  out.available = false;
-  out.mandatory = false;
-  out.version = "";
-  out.url = "";
-  out.md5 = "";
-  out.size = 0;
-  out.minBattery = -1;
-  out.minRssi = -999;
-  chairOut.found = false;
-  chairOut.id = "";
-  chairOut.enabled = true;
-  chairOut.currentFirmware = "";
-
-  String chairResp;
-  String chairPath = "/rest/v1/chairs?select=id,enabled,current_firmware&serial_number=eq." + NUMERO_SERIE_CADEIRA + "&limit=1";
-  if (supabaseGetJson(chairPath, chairResp)) {
-    DynamicJsonDocument doc(1536);
-    DeserializationError err = deserializeJson(doc, chairResp);
-    if (!err && doc.is<JsonArray>() && doc.size() > 0) {
-      JsonObject c = doc[0].as<JsonObject>();
-      chairOut.found = true;
-      chairOut.id = c["id"] | "";
-      chairOut.enabled = c["enabled"] | true;
-      chairOut.currentFirmware = c["current_firmware"] | "";
-    }
-  }
-
-  Serial.print("[OTA] chair ");
-  Serial.print(chairOut.found ? "FOUND" : "NOT_FOUND");
-  Serial.print(" enabled=");
-  Serial.print(chairOut.enabled ? "1" : "0");
-  Serial.print(" current_firmware=");
-  Serial.println(chairOut.currentFirmware.length() ? chairOut.currentFirmware : "NA");
-
-  if (chairOut.found && !chairOut.enabled) {
-    return true;
-  }
-
-  String fwResp;
-  String fwPath = "/rest/v1/firmware_versions?select=version,download_url,file_size,md5_hash,min_battery,min_rssi,mandatory,enabled,published_at&enabled=eq.true&order=published_at.desc&limit=1";
-  if (!supabaseGetJson(fwPath, fwResp)) {
-    return false;
-  }
-
-  DynamicJsonDocument doc(2048);
-  DeserializationError err = deserializeJson(doc, fwResp);
-  if (err || !doc.is<JsonArray>() || doc.size() == 0) {
-    return false;
-  }
-  JsonObject f = doc[0].as<JsonObject>();
-  out.version = f["version"] | "";
-  out.url = f["download_url"] | "";
-  out.md5 = f["md5_hash"] | "";
-  out.size = f["file_size"] | 0;
-  out.mandatory = f["mandatory"] | false;
-  out.minBattery = f["min_battery"] | -1;
-  out.minRssi = f["min_rssi"] | -999;
-
-  Serial.print("[OTA] target version=");
-  Serial.print(out.version.length() ? out.version : "NA");
-  Serial.print(" size=");
-  Serial.print(out.size);
-  Serial.print(" md5=");
-  Serial.print(out.md5.length() ? "SET" : "NA");
-  Serial.print(" min_rssi=");
-  Serial.print(out.minRssi);
-  Serial.print(" min_battery=");
-  Serial.print(out.minBattery);
-  Serial.print(" mandatory=");
-  Serial.println(out.mandatory ? "1" : "0");
-
-  if (out.version.length() == 0 || out.url.length() == 0) {
-    return true;
-  }
-  if (chairOut.currentFirmware.length() > 0 && otaCompareVersions(out.version, chairOut.currentFirmware) <= 0) {
-    Serial.println("[OTA] target <= current_firmware (no update)");
-    return true;
-  }
-  if (otaCompareVersions(out.version, FIRMWARE_VERSION) > 0) {
-    out.available = true;
-  }
-  Serial.print("[OTA] compare fwVersion=");
-  Serial.print(FIRMWARE_VERSION);
-  Serial.print(" -> update_available=");
-  Serial.println(out.available ? "1" : "0");
-  return true;
-}
-
-static void otaUpdateChairLastUpdateCheck() {
-  String ts = getTimestamp();
-  if (ts.length() == 0 || ts == "null") return;
-  StaticJsonDocument<128> doc;
-  doc["last_update_check"] = ts;
-  String payload;
-  serializeJson(doc, payload);
-  bool ok = supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload);
-  Serial.print("[OTA] chairs.last_update_check ");
-  Serial.println(ok ? "OK" : "FAIL");
-}
-
-static void otaUpdateChairLastUpdateAttempt() {
-  String ts = getTimestamp();
-  if (ts.length() == 0 || ts == "null") return;
-  StaticJsonDocument<128> doc;
-  doc["last_update_attempt"] = ts;
-  String payload;
-  serializeJson(doc, payload);
-  bool ok = supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload);
-  Serial.print("[OTA] chairs.last_update_attempt ");
-  Serial.println(ok ? "OK" : "FAIL");
-}
-
-static String otaDeviceUpdatesInsertDownloading(const ChairOtaInfo& chair, const OtaInfo& info, const String& fromVersion) {
-  if (!chair.found || chair.id.length() == 0) return "";
-  String ts = getTimestamp();
-  if (ts.length() == 0 || ts == "null") ts = "";
-
-  StaticJsonDocument<384> doc;
-  doc["device_id"] = chair.id;
-  doc["from_version"] = fromVersion;
-  doc["to_version"] = info.version;
-  doc["status"] = "downloading";
-  doc["error_message"] = nullptr;
-  if (ts.length() > 0) doc["started_at"] = ts;
-
-  String payload;
-  serializeJson(doc, payload);
-
-  String resp;
-  if (!supabasePostJsonResponse("/rest/v1/device_updates", payload, resp)) {
-    return "";
-  }
-
-  DynamicJsonDocument outDoc(1024);
-  DeserializationError err = deserializeJson(outDoc, resp);
-  if (!err && outDoc.is<JsonArray>() && outDoc.size() > 0) {
-    String id = outDoc[0]["id"] | "";
-    Serial.print("[OTA] device_updates downloading id=");
-    Serial.println(id.length() ? id : "NA");
-    return id;
-  }
-  return "";
-}
-
-static void otaDeviceUpdatesFinalize(const String& updateId, const String& status, const String& errorMessage, int durationSeconds, int bytesDownloaded) {
-  if (updateId.length() == 0) return;
-  String ts = getTimestamp();
-  if (ts.length() == 0 || ts == "null") ts = "";
-
-  StaticJsonDocument<384> doc;
-  doc["status"] = status;
-  if (errorMessage.length() > 0) doc["error_message"] = errorMessage;
-  else doc["error_message"] = nullptr;
-  if (ts.length() > 0) doc["completed_at"] = ts;
-  if (durationSeconds >= 0) doc["duration_seconds"] = durationSeconds;
-  if (bytesDownloaded >= 0) doc["bytes_downloaded"] = bytesDownloaded;
-
-  String payload;
-  serializeJson(doc, payload);
-  bool ok = supabasePatchJson("/rest/v1/device_updates?id=eq." + updateId, payload);
-  Serial.print("[OTA] device_updates ");
-  Serial.print(updateId);
-  Serial.print(" -> ");
-  Serial.print(status);
-  Serial.print(" ");
-  Serial.println(ok ? "OK" : "FAIL");
-}
-
-static void otaUpdateChairAfterSuccess(const OtaInfo& info) {
-  String ts = getTimestamp();
-  if (ts.length() == 0 || ts == "null") ts = "";
-
-  StaticJsonDocument<384> doc;
-  doc["current_firmware"] = info.version;
-  if (ts.length() > 0) {
-    doc["last_update"] = ts;
-    doc["last_update_check"] = ts;
-    doc["last_update_attempt"] = ts;
-  }
-  String payload;
-  serializeJson(doc, payload);
-  bool ok = supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload);
-  Serial.print("[OTA] chairs.current_firmware=");
-  Serial.print(info.version);
-  Serial.print(" ");
-  Serial.println(ok ? "OK" : "FAIL");
-}
-
-static bool otaFetchUpdateInfo(OtaInfo& out, ChairOtaInfo& chairOut) {
-  if (otaManifestUrl.length() > 0) {
-    chairOut.found = false;
-    chairOut.id = "";
-    chairOut.enabled = true;
-    chairOut.currentFirmware = "";
-    return otaFetchManifest(out);
-  }
-  return otaFetchFromSupabaseTables(out, chairOut);
 }
 
 static bool otaDownloadAndUpdate(const OtaInfo& info) {
@@ -1380,16 +923,21 @@ static bool otaDownloadAndUpdate(const OtaInfo& info) {
   if (info.url.length() == 0) {
     return false;
   }
+  if (!cadeiraHabilitada) {
+    return false;
+  }
 
-  uint32_t startedAtMs = millis();
+  const String fromVersion = supabaseChairFirmware.length() > 0 ? supabaseChairFirmware : String(FIRMWARE_VERSION);
+  const String toVersion = info.version.length() > 0 ? info.version : String(FIRMWARE_VERSION);
+  const uint32_t startMs = millis();
+
   otaInProgress = true;
-  Serial.print("[OTA] START from=");
-  Serial.print(otaActiveFromVersion.length() ? otaActiveFromVersion : String(FIRMWARE_VERSION));
-  Serial.print(" to=");
-  Serial.println(info.version.length() ? info.version : "NA");
   enviarBLE("OTA:START");
   mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_START", false);
   mqttStatusDirty = true;
+
+  supabaseOtaPatchLastUpdateAttempt();
+  supabaseOtaInsertDeviceUpdate(fromVersion, toVersion, "downloading", "", false, 0, 0);
 
   if (mqttLockMs(200)) {
     if (mqttClient.connected()) {
@@ -1413,17 +961,13 @@ static bool otaDownloadAndUpdate(const OtaInfo& info) {
   http.addHeader("Cache-Control", "no-cache");
   http.addHeader("Connection", "close");
 
-  Serial.print("[OTA] DOWNLOAD url=");
-  Serial.println(info.url);
   int httpCode = http.GET();
   if (httpCode != HTTP_CODE_OK) {
     http.end();
     otaInProgress = false;
-    otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", String("HTTP ") + httpCode, static_cast<int>((millis() - startedAtMs) / 1000), 0);
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_HTTP", false);
     enviarBLE("OTA:FAIL");
-    Serial.print("[OTA] FAIL HTTP=");
-    Serial.println(httpCode);
+    supabaseOtaInsertDeviceUpdate(fromVersion, toVersion, "failed", "http_error", true, (millis() - startMs) / 1000, 0);
     return false;
   }
 
@@ -1435,114 +979,58 @@ static bool otaDownloadAndUpdate(const OtaInfo& info) {
   if (contentLength <= 0) {
     http.end();
     otaInProgress = false;
-    otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", "LEN", static_cast<int>((millis() - startedAtMs) / 1000), 0);
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_LEN", false);
     enviarBLE("OTA:FAIL");
-    Serial.println("[OTA] FAIL LEN");
+    supabaseOtaInsertDeviceUpdate(fromVersion, toVersion, "failed", "invalid_length", true, (millis() - startMs) / 1000, 0);
     return false;
   }
 
-  Serial.print("[OTA] INSTALL prepare size=");
-  Serial.print(contentLength);
-  Serial.print(" md5=");
-  Serial.println(info.md5.length() ? "SET" : "NA");
   if (info.md5.length() > 0) {
     Update.setMD5(info.md5.c_str());
   }
   if (!Update.begin(contentLength)) {
     http.end();
     otaInProgress = false;
-    otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", String("BEGIN ") + Update.getError(), static_cast<int>((millis() - startedAtMs) / 1000), 0);
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_BEGIN", false);
     enviarBLE("OTA:FAIL");
-    Serial.print("[OTA] FAIL BEGIN err=");
-    Serial.println(Update.getError());
+    supabaseOtaInsertDeviceUpdate(fromVersion, toVersion, "failed", "begin_failed", true, (millis() - startMs) / 1000, 0);
     return false;
   }
 
-  WiFiClient* stream = http.getStreamPtr();
-  size_t writtenTotal = 0;
-  uint32_t lastProgressMs = millis();
-  const uint32_t progressEveryMs = 1500;
-  uint8_t buf[1024];
-  while (http.connected() && static_cast<int32_t>(writtenTotal - static_cast<size_t>(contentLength)) < 0) {
-    size_t avail = stream->available();
-    if (avail == 0) {
-      delay(1);
-      continue;
-    }
-    size_t toRead = avail;
-    if (toRead > sizeof(buf)) toRead = sizeof(buf);
-    int r = stream->readBytes(buf, toRead);
-    if (r <= 0) {
-      delay(1);
-      continue;
-    }
-    size_t w = Update.write(buf, static_cast<size_t>(r));
-    writtenTotal += w;
-    if (w != static_cast<size_t>(r)) {
-      Update.abort();
-      http.end();
-      otaInProgress = false;
-      otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", String("WRITE_MISMATCH ") + Update.getError(), static_cast<int>((millis() - startedAtMs) / 1000), static_cast<int>(writtenTotal));
-      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_WRITE", false);
-      enviarBLE("OTA:FAIL");
-      Serial.print("[OTA] FAIL WRITE_MISMATCH err=");
-      Serial.println(Update.getError());
-      return false;
-    }
-    uint32_t now = millis();
-    if ((now - lastProgressMs) >= progressEveryMs) {
-      lastProgressMs = now;
-      int pct = (contentLength > 0) ? static_cast<int>((writtenTotal * 100ULL) / static_cast<uint64_t>(contentLength)) : 0;
-      Serial.print("[OTA] DOWNLOADING ");
-      Serial.print(pct);
-      Serial.print("% (");
-      Serial.print(static_cast<uint32_t>(writtenTotal));
-      Serial.print("/");
-      Serial.print(contentLength);
-      Serial.println(")");
-    }
-  }
+  supabaseOtaInsertDeviceUpdate(fromVersion, toVersion, "installing", "", false, 0, 0);
 
-  if (writtenTotal == 0) {
+  WiFiClient* stream = http.getStreamPtr();
+  size_t written = Update.writeStream(*stream);
+  if (written == 0) {
     Update.abort();
     http.end();
     otaInProgress = false;
-    otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", String("WRITE ") + Update.getError(), static_cast<int>((millis() - startedAtMs) / 1000), 0);
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_WRITE", false);
     enviarBLE("OTA:FAIL");
-    Serial.print("[OTA] FAIL WRITE err=");
-    Serial.println(Update.getError());
+    supabaseOtaInsertDeviceUpdate(fromVersion, toVersion, "failed", "write_failed", true, (millis() - startMs) / 1000, 0);
     return false;
   }
-  Serial.print("[OTA] DOWNLOADED bytes=");
-  Serial.println(static_cast<uint32_t>(writtenTotal));
 
   bool okEnd = Update.end();
   bool okFinished = Update.isFinished();
   http.end();
   if (!okEnd || !okFinished) {
     otaInProgress = false;
-    otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "failed", String("END ") + Update.getError(), static_cast<int>((millis() - startedAtMs) / 1000), static_cast<int>(writtenTotal));
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_FAIL_END", false);
     enviarBLE("OTA:FAIL");
-    Serial.print("[OTA] FAIL END err=");
-    Serial.print(Update.getError());
-    Serial.print(" end=");
-    Serial.print(okEnd ? "1" : "0");
-    Serial.print(" finished=");
-    Serial.println(okFinished ? "1" : "0");
+    supabaseOtaInsertDeviceUpdate(fromVersion, toVersion, "failed", "end_failed", true, (millis() - startMs) / 1000, static_cast<int>(written));
     return false;
+  }
+
+  supabaseOtaInsertDeviceUpdate(fromVersion, toVersion, "success", "", true, (millis() - startMs) / 1000, static_cast<int>(written));
+  if (info.version.length() > 0) {
+    supabaseOtaPatchCurrentFirmware(info.version);
   }
 
   otaPendingVersion = info.version;
   otaSavePreferences();
-  otaUpdateChairAfterSuccess(info);
-  otaDeviceUpdatesFinalize(otaActiveDeviceUpdateId, "success", "", static_cast<int>((millis() - startedAtMs) / 1000), static_cast<int>(writtenTotal));
   mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_OK_REBOOT", false);
   enviarBLE("OTA:OK");
-  Serial.println("[OTA] OK REBOOT");
   delay(2000);
   ESP.restart();
   return true;
@@ -1553,16 +1041,16 @@ static void otaValidateAfterBoot() {
     return;
   }
   if (otaPendingVersion == FIRMWARE_VERSION) {
-    otaValidatedVersionToReport = otaPendingVersion;
     otaPendingVersion = "";
     otaSavePreferences();
     mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_VALIDATED", false);
     enviarBLE("OTA:VALIDATED");
+    supabaseOtaPatchCurrentFirmware(FIRMWARE_VERSION);
   }
 }
 
 static void otaTick() {
-  if (!otaEnabled) {
+  if (!otaEnabled || otaManifestUrl.length() == 0) {
     return;
   }
   if (otaInProgress) {
@@ -1573,7 +1061,7 @@ static void otaTick() {
   }
   uint32_t now = millis();
   if (otaNextCheckAtMs == 0) {
-    otaNextCheckAtMs = now + 5000;
+    otaNextCheckAtMs = now + 30000;
     return;
   }
   if (now < otaNextCheckAtMs) {
@@ -1581,71 +1069,22 @@ static void otaTick() {
   }
   otaNextCheckAtMs = now + (otaIntervalSec * 1000UL);
 
-  Serial.println("[OTA] CHECK");
-
-  if (otaValidatedVersionToReport.length() > 0) {
-    String ts = getTimestamp();
-    StaticJsonDocument<256> doc;
-    doc["current_firmware"] = otaValidatedVersionToReport;
-    doc["last_update"] = ts;
-    String payload;
-    serializeJson(doc, payload);
-    supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload);
-    otaValidatedVersionToReport = "";
+  if (supabaseChairId.length() == 0) {
+    verificaStatusCadeira();
   }
-
-  otaUpdateChairLastUpdateCheck();
 
   OtaInfo info;
-  ChairOtaInfo chair;
-  if (otaFetchUpdateInfo(info, chair)) {
-    if (chair.found && !chair.enabled) {
-      Serial.println("[OTA] SKIP (chair disabled)");
-      return;
-    }
-    if (info.available) {
-      int rssi = WiFi.RSSI();
-      if (info.minRssi > -200 && rssi < info.minRssi) {
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_SKIP_RSSI", false);
-        Serial.print("[OTA] SKIP RSSI rssi=");
-        Serial.print(rssi);
-        Serial.print(" min=");
-        Serial.println(info.minRssi);
-        return;
-      }
-      int bat = otaGetBatteryPercent();
-      if (info.minBattery > 0 && bat >= 0 && bat < info.minBattery) {
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "OTA_SKIP_BAT", false);
-        Serial.print("[OTA] SKIP BAT bat=");
-        Serial.print(bat);
-        Serial.print(" min=");
-        Serial.println(info.minBattery);
-        return;
-      }
-
-      otaUpdateChairLastUpdateAttempt();
-      otaActiveFromVersion = chair.currentFirmware.length() > 0 ? chair.currentFirmware : String(FIRMWARE_VERSION);
-      otaActiveToVersion = info.version;
-      otaActiveDeviceUpdateId = otaDeviceUpdatesInsertDownloading(chair, info, otaActiveFromVersion);
-      Serial.print("[OTA] APPLY from=");
-      Serial.print(otaActiveFromVersion);
-      Serial.print(" to=");
-      Serial.println(otaActiveToVersion);
-      bool ok = otaDownloadAndUpdate(info);
-      if (!ok) {
-        otaActiveDeviceUpdateId = "";
-        otaActiveFromVersion = "";
-        otaActiveToVersion = "";
-      }
-      return;
-    }
+  if (otaFetchManifest(info) && info.available) {
+    supabaseOtaInsertDeviceUpdate(supabaseChairFirmware.length() ? supabaseChairFirmware : String(FIRMWARE_VERSION),
+                                 info.version.length() ? info.version : String(FIRMWARE_VERSION),
+                                 "checking", "", false, 0, 0);
+    otaDownloadAndUpdate(info);
   }
-  Serial.println("[OTA] NO_UPDATE");
 }
 
 static bool mqttIsControlCommand(const String& cmdUpper) {
   return cmdUpper == "DE" || cmdUpper == "SE" || cmdUpper == "SA" || cmdUpper == "DA" ||
-         cmdUpper == "SP" || cmdUpper == "DP" || cmdUpper == "TS" || cmdUpper == "TD" || cmdUpper == "TREND_TEST" || cmdUpper == "RF" || cmdUpper == "VZ" ||
+         cmdUpper == "SP" || cmdUpper == "DP" || cmdUpper == "TS" || cmdUpper == "TD" || cmdUpper == "RF" || cmdUpper == "VZ" ||
          cmdUpper == "PT" || cmdUpper == "M1" || cmdUpper == "STOP" || cmdUpper == "AT_SEG" ||
          cmdUpper == "STATUS";
 }
@@ -1701,15 +1140,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
-static void saveMqttPreferences();
-static bool tlsHandshakeOnce(const String& host, uint16_t port);
-static bool mqttRawConnackOnce(const String& host, uint16_t port, const String& clientId);
-
 void reconnectMQTT() {
   if (!mqttClient.connected()) {
     static uint32_t mqttNextAttemptMs = 0;
-    static uint8_t mqttNetFailStreak = 0;
-    static uint8_t mqttTlsFailStreak = 0;
     uint32_t now = millis();
     if (static_cast<int32_t>(now - mqttNextAttemptMs) < 0) {
       return;
@@ -1727,44 +1160,6 @@ void reconnectMQTT() {
       return;
     }
 
-    if (mqttUseTls) {
-      resetMqttSecureClient();
-      WiFiClientSecure& sc = mqttSecureClientRef();
-      sc.stop();
-      sc.setHandshakeTimeout(15);
-      sc.setTimeout(20);
-      sc.setInsecure();
-      mqttClient.setClient(sc);
-    } else {
-      mqttClient.setClient(mqttPlainClient);
-    }
-    mqttClient.setSocketTimeout(5);
-    mqttClient.setKeepAlive(30);
-
-    mqttClient.setServer(mqttHost.c_str(), mqttPort);
-    if (WiFi.status() == WL_CONNECTED) {
-      IPAddress ip;
-      if (WiFi.hostByName(mqttHost.c_str(), ip) == 1) {
-        Serial.print("ip=");
-        Serial.print(ip);
-        Serial.print(" port=");
-        Serial.print(mqttPort);
-        Serial.print(" tls=");
-        Serial.print(mqttUseTls ? "1" : "0");
-        Serial.print(" clean=");
-        Serial.println(mqttCleanSession ? "1" : "0");
-      } else {
-        Serial.print("dns_fail host=");
-        Serial.print(mqttHost);
-        Serial.print(" port=");
-        Serial.print(mqttPort);
-        Serial.print(" tls=");
-        Serial.print(mqttUseTls ? "1" : "0");
-        Serial.print(" clean=");
-        Serial.println(mqttCleanSession ? "1" : "0");
-      }
-    }
-
     if (mqttUser.length() > 0 && mqttPass.length() == 0) {
       Serial.println("falhou, senha vazia (use MQTT_PASS=...)");
       mqttUnlock();
@@ -1776,10 +1171,13 @@ void reconnectMQTT() {
     if (mqttUser.length() == 0 && mqttPass.length() == 0) {
       ok = mqttClient.connect(
         clientId.c_str(),
+        "",
+        "",
         willTopic.c_str(),
         1,
         true,
-        "offline"
+        "offline",
+        mqttCleanSession
       );
     } else if (mqttUser.length() > 0) {
       ok = mqttClient.connect(
@@ -1792,215 +1190,47 @@ void reconnectMQTT() {
         "offline",
         mqttCleanSession
       );
+    } else {
+      Serial.println("falhou, usuario vazio");
+      mqttUnlock();
+      mqttNextAttemptMs = now + 5000;
+      return;
     }
     if (ok) {
       Serial.println("conectado!");
-      beepMqttErrorDone = false;
-      mqttOkAtMs = millis();
-      mqttLostAtMs = 0;
-      mqttNetFailStreak = 0;
-      mqttTlsFailStreak = 0;
-      mqttPostConnectPending = true;
-      mqttSubscribed = false;
-      mqttPostConnectUntilMs = millis() + 5000;
+      
+      // Inscreve-se no tópico de comandos
+      String commandTopic = MQTT_TOPIC_BASE + "command";
+      mqttClient.subscribe(commandTopic.c_str(), 0);
+      Serial.print("[MQTT] Inscrito no tópico: ");
+      Serial.println(commandTopic);
+
+      mqttClient.publish(willTopic.c_str(), "online", true);
+      mqttTxCount++;
+      mqttLastTxMs = millis();
+
+      publicaStatusMQTT();
+
       mqttUnlock();
+
+      // Não publica status inicial
+      if (!beepNetMqttOkDone && WiFi.status() == WL_CONNECTED) {
+        bip();
+        delay(100);
+        bip();
+        Serial.println("[BUZZER] WiFi+MQTT OK");
+        beepNetMqttOkDone = true;
+        supabaseLogUsage("MQTT_CONNECTED");
+      }
       
     } else {
       Serial.print("falhou, rc=");
-      int st = mqttClient.state();
-      Serial.print(st);
+      Serial.print(mqttClient.state());
       Serial.println(" tentando novamente em 5 segundos");
       mqttUnlock();
-      if (mqttUseTls) {
-        Serial.print("[MQTT_TLS] connect_fail port=");
-        Serial.print(mqttPort);
-        Serial.print(" fd=");
-        Serial.println(mqttSecureClientPtr ? mqttSecureClientPtr->fd() : -1);
-        char errBuf[160];
-        memset(errBuf, 0, sizeof(errBuf));
-        int errCode = mqttSecureClientPtr ? mqttSecureClientPtr->lastError(errBuf, sizeof(errBuf)) : 0;
-        Serial.print("[MQTT_TLS] lastError=");
-        Serial.print(errCode);
-        Serial.print(" msg=");
-        Serial.println(errBuf);
-        static uint32_t mqttDiagNextMs = 0;
-        if (static_cast<int32_t>(now - mqttDiagNextMs) >= 0) {
-          mqttDiagNextMs = now + 30000;
-          bool tlsOk = tlsHandshakeOnce(mqttHost, mqttPort);
-          if (tlsOk) {
-            String cid = mqttClientId.length() > 0 ? mqttClientId : ("ESP32-" + NUMERO_SERIE_CADEIRA);
-            bool connackOk = mqttRawConnackOnce(mqttHost, mqttPort, cid);
-            if (!connackOk) {
-              Serial.println("[MQTT] Broker sem CONNACK no teste RAW");
-            }
-          }
-        }
-      }
-      if (st == -2) {
-        if (mqttNetFailStreak < 255) mqttNetFailStreak++;
-        if (!mqttUseTls && mqttPort == 1883 && mqttNetFailStreak >= 1) {
-          mqttUseTls = true;
-          mqttPort = 8883;
-          mqttTlsFailStreak = 0;
-          Serial.println("[MQTT] Alternando para TLS (8883) por falha persistente em 1883");
-          saveMqttPreferences();
-          mqttNextAttemptMs = now + 1000;
-          return;
-        }
-      } else {
-        mqttNetFailStreak = 0;
-      }
-      if (mqttUseTls) {
-        if (mqttTlsFailStreak < 255) mqttTlsFailStreak++;
-        if (mqttTlsFailStreak >= 2) {
-          mqttTlsFailStreak = 0;
-          if (mqttPort != 8883) {
-            mqttPort = 8883;
-            Serial.println("[MQTT] Alternando TLS para porta 8883 por falha persistente");
-            saveMqttPreferences();
-            mqttNextAttemptMs = now + 1000;
-            return;
-          }
-        }
-      } else {
-        mqttTlsFailStreak = 0;
-      }
       mqttNextAttemptMs = now + 5000;
     }
   }
-}
-
-static bool tlsHandshakeOnce(const String& host, uint16_t port) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[TLS_TEST] WiFi desconectado");
-    return false;
-  }
-  WiFiClientSecure client;
-  client.stop();
-  client.setHandshakeTimeout(15);
-  client.setTimeout(20);
-  client.setInsecure();
-  uint32_t t0 = millis();
-  bool ok = client.connect(host.c_str(), port);
-  uint32_t dt = millis() - t0;
-  Serial.print("[TLS_TEST] host=");
-  Serial.print(host);
-  Serial.print(" port=");
-  Serial.print(port);
-  Serial.print(" ok=");
-  Serial.print(ok ? "1" : "0");
-  Serial.print(" ms=");
-  Serial.print(dt);
-  Serial.print(" fd=");
-  Serial.println(client.fd());
-  client.stop();
-  return ok;
-}
-
-static bool mqttRawConnackOnce(const String& host, uint16_t port, const String& clientId) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[MQTT_RAW] WiFi desconectado");
-    return false;
-  }
-
-  WiFiClientSecure client;
-  client.stop();
-  client.setHandshakeTimeout(15);
-  client.setTimeout(20);
-  client.setInsecure();
-
-  uint32_t t0 = millis();
-  bool ok = client.connect(host.c_str(), port);
-  uint32_t tlsMs = millis() - t0;
-
-  Serial.print("[MQTT_RAW] tls host=");
-  Serial.print(host);
-  Serial.print(" port=");
-  Serial.print(port);
-  Serial.print(" ok=");
-  Serial.print(ok ? "1" : "0");
-  Serial.print(" ms=");
-  Serial.print(tlsMs);
-  Serial.print(" fd=");
-  Serial.println(client.fd());
-
-  if (!ok) {
-    client.stop();
-    return false;
-  }
-
-  uint8_t pkt[256];
-  size_t cidLen = static_cast<size_t>(clientId.length());
-  if (cidLen == 0 || cidLen > 200) {
-    client.stop();
-    return false;
-  }
-
-  size_t vhLen = 10;
-  size_t payloadLen = 2 + cidLen;
-  size_t remLen = vhLen + payloadLen;
-  if (remLen > 127) {
-    client.stop();
-    return false;
-  }
-
-  size_t i = 0;
-  pkt[i++] = 0x10;
-  pkt[i++] = static_cast<uint8_t>(remLen);
-  pkt[i++] = 0x00; pkt[i++] = 0x04;
-  pkt[i++] = 'M'; pkt[i++] = 'Q'; pkt[i++] = 'T'; pkt[i++] = 'T';
-  pkt[i++] = 0x04;
-  pkt[i++] = 0x02;
-  pkt[i++] = 0x00; pkt[i++] = 60;
-  pkt[i++] = static_cast<uint8_t>((cidLen >> 8) & 0xFF);
-  pkt[i++] = static_cast<uint8_t>(cidLen & 0xFF);
-  for (size_t k = 0; k < cidLen; k++) {
-    pkt[i++] = static_cast<uint8_t>(clientId[k]);
-  }
-
-  uint32_t t1 = millis();
-  int wr = client.write(pkt, i);
-  client.flush();
-  uint32_t wrMs = millis() - t1;
-  Serial.print("[MQTT_RAW] write bytes=");
-  Serial.print(i);
-  Serial.print(" wr=");
-  Serial.print(wr);
-  Serial.print(" ms=");
-  Serial.println(wrMs);
-
-  uint8_t resp[4];
-  uint32_t deadline = millis() + 3000;
-  size_t got = 0;
-  while (static_cast<int32_t>(millis() - deadline) < 0 && got < sizeof(resp)) {
-    if (!client.connected()) {
-      break;
-    }
-    int av = client.available();
-    if (av <= 0) {
-      delay(10);
-      continue;
-    }
-    int r = client.read(resp + got, sizeof(resp) - got);
-    if (r > 0) got += static_cast<size_t>(r);
-    else break;
-  }
-
-  Serial.print("[MQTT_RAW] resp_len=");
-  Serial.println(got);
-  Serial.print("[MQTT_RAW] connected=");
-  Serial.println(client.connected() ? "1" : "0");
-  if (got == 4) {
-    Serial.print("[MQTT_RAW] resp=");
-    Serial.print(resp[0], HEX); Serial.print(" ");
-    Serial.print(resp[1], HEX); Serial.print(" ");
-    Serial.print(resp[2], HEX); Serial.print(" ");
-    Serial.println(resp[3], HEX);
-  }
-
-  bool connackOk = (got == 4 && resp[0] == 0x20 && resp[1] == 0x02 && resp[2] == 0x00 && resp[3] == 0x00);
-  client.stop();
-  return connackOk;
 }
 
 static void mqttTaskMain(void* pvParameters) {
@@ -2016,54 +1246,8 @@ static void mqttTaskMain(void* pvParameters) {
       continue;
     }
     if (WiFi.status() == WL_CONNECTED) {
-      uint32_t now = millis();
-      if (!mqttConnectEnabled) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-        continue;
-      }
-      if (mqttReadyAtMs != 0 && static_cast<int32_t>(now - mqttReadyAtMs) < 0) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-        continue;
-      }
       reconnectMQTT();
       if (mqttClient.connected()) {
-        if (mqttPostConnectPending && mqttPostConnectUntilMs != 0 && static_cast<int32_t>(now - mqttPostConnectUntilMs) >= 0) {
-          mqttPostConnectPending = false;
-          mqttPostConnectUntilMs = 0;
-        }
-        if (mqttPostConnectPending) {
-          if (mqttLockMs(250)) {
-            if (!mqttSubscribed) {
-              mqttClient.setSocketTimeout(5);
-              String commandTopic = MQTT_TOPIC_BASE + "command";
-              bool subOk = mqttClient.subscribe(commandTopic.c_str(), 0);
-              mqttSubscribed = subOk;
-              Serial.print("[MQTT] Subscribe command ");
-              Serial.print(subOk ? "OK " : "FAIL ");
-              Serial.println(commandTopic);
-            }
-            if (mqttSubscribed) {
-              String willTopic = MQTT_TOPIC_BASE + "lwt";
-              bool pubOk = mqttClient.publish(willTopic.c_str(), "online", true);
-              mqttTxCount++;
-              mqttLastTxMs = millis();
-              Serial.print("[MQTT] LWT online ");
-              Serial.println(pubOk ? "OK" : "FAIL");
-              publicaStatusMQTT();
-              if (!beepNetMqttOkDone && WiFi.status() == WL_CONNECTED) {
-                bip(); delay(120);
-                bip(); delay(120);
-                bip();
-                Serial.println("[BUZZER] WiFi+MQTT OK");
-                beepNetMqttOkDone = true;
-                supabaseLogUsage("MQTT_CONNECTED");
-              }
-              mqttPostConnectPending = false;
-              mqttPostConnectUntilMs = 0;
-            }
-            mqttUnlock();
-          }
-        }
         if (mqttLockMs(50)) {
           mqttClient.loop();
           if (mqttTxQueue) {
@@ -2088,9 +1272,6 @@ static void mqttTaskMain(void* pvParameters) {
       }
     } else {
       beepNetMqttOkDone = false;
-      mqttPostConnectPending = false;
-      mqttSubscribed = false;
-      mqttPostConnectUntilMs = 0;
       if (mqttClient.connected()) {
         if (mqttLockMs(50)) {
           mqttClient.disconnect();
@@ -2135,10 +1316,8 @@ void publicaStatusMQTT() {
     doc["legPosition"] = incoder_virtual_perneira_service;
     doc["gavetaOpen"] = isGavetaAbertaRaw();
     doc["gavetaLockIgnored"] = ignoreGavetaLock;
-    if (TREN_INT_DESCE >= 0) doc["trenIntDown"] = (digitalRead(TREN_INT_DESCE) == HIGH);
-    if (INT_TREND_DESCE >= 0) doc["trendIntDown"] = (digitalRead(INT_TREND_DESCE) == HIGH);
-    if (TREN_INT_SOBE >= 0) doc["trenIntUp"] = (digitalRead(TREN_INT_SOBE) == HIGH);
-    if (INT_TREND_SOBE >= 0) doc["trendIntUp"] = (digitalRead(INT_TREND_SOBE) == HIGH);
+    if (TREN_INT_DESCE >= 0) doc["trenIntDown"] = (digitalRead(TREN_INT_DESCE) == LOW);
+    if (INT_TREND_DESCE >= 0) doc["trendIntDown"] = (digitalRead(INT_TREND_DESCE) == LOW);
     String ts = getTimestamp();
     if (ts.length() > 0 && ts != "null") {
       doc["timestamp"] = ts;
@@ -2151,13 +1330,10 @@ void publicaStatusMQTT() {
 }
 
 #if HAS_BLE
-static void beepSeqStart(uint8_t count, uint16_t onMs, uint16_t offMs);
-
 class MyServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     bleClienteConectado = true;
     bleAdvertisingAtivo = false;
-    beepSeqStart(4, 100, 120);
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO CONECTADO!");
     Serial.println("====================================");
@@ -2286,15 +1462,11 @@ const int DA = PCF_PIN(7);
 const int SA = PIN_SA;
 const int RF = PIN_RF;
 int GAVETA = PIN_GAVETA;
-static int gavetaIdleLevel = -1;
 const int ENCODER1 = PIN_ENCODER1;
 const int ENCODER2 = PIN_ENCODER2;
 const int ENCODER3 = PIN_ENCODER3;
-const int ENCODER_TREND = PIN_ENCODER_TREND;
 const int TREN_INT_DESCE = PIN_TREN_INT_DESCE;
 const int INT_TREND_DESCE = PIN_INT_TREND_DESCE;
-const int TREN_INT_SOBE = PIN_TREN_INT_SOBE;
-const int INT_TREND_SOBE = PIN_INT_TREND_SOBE;
 
 static void loadGavetaPinPreference() {
   Preferences p;
@@ -2322,20 +1494,14 @@ static bool isGavetaAberta() {
   if (GAVETA < 0) {
     return false;
   }
-  if (gavetaIdleLevel == -1) {
-    return digitalRead(GAVETA) == LOW;
-  }
-  return digitalRead(GAVETA) != gavetaIdleLevel;
+  return digitalRead(GAVETA) == LOW;
 }
 
 static bool isGavetaAbertaRaw() {
   if (GAVETA < 0) {
     return false;
   }
-  if (gavetaIdleLevel == -1) {
-    return digitalRead(GAVETA) == LOW;
-  }
-  return digitalRead(GAVETA) != gavetaIdleLevel;
+  return digitalRead(GAVETA) == LOW;
 }
 
 extern int fim_encosto_encoder;
@@ -2372,6 +1538,10 @@ static void loadMqttPreferences() {
   if (!p.begin("mqtt", true)) {
     return;
   }
+  bool migrated = false;
+  if (p.isKey("migrated")) {
+    migrated = p.getBool("migrated", false);
+  }
   if (p.isKey("host")) {
     mqttHost = p.getString("host", mqttHost);
   }
@@ -2397,6 +1567,28 @@ static void loadMqttPreferences() {
     mqttCleanSession = p.getBool("clean", mqttCleanSession);
   }
   p.end();
+
+  if (!migrated && mqttHost == "broker.emqx.io") {
+    mqttHost = "test.mosquitto.org";
+    mqttPort = 1883;
+    mqttUser = "";
+    mqttPass = "";
+    mqttUseTls = false;
+    mqttClientId = "";
+    mqttCleanSession = true;
+    Preferences w;
+    if (w.begin("mqtt", false)) {
+      w.putString("host", mqttHost);
+      w.putUInt("port", mqttPort);
+      w.putString("user", mqttUser);
+      w.putString("pass", mqttPass);
+      w.putBool("tls", mqttUseTls);
+      w.putString("cid", mqttClientId);
+      w.putBool("clean", mqttCleanSession);
+      w.putBool("migrated", true);
+      w.end();
+    }
+  }
 }
 
 static void saveMqttPreferences() {
@@ -2415,12 +1607,9 @@ static void saveMqttPreferences() {
 }
 
 static void applyMqttRuntimeConfig() {
-  bool locked = false;
-  if (mqttMutex) {
-    locked = mqttLockMs(200);
-    if (!locked) {
-      return;
-    }
+  bool locked = mqttLockMs(200);
+  if (!locked) {
+    return;
   }
   if (mqttUseTls && mqttPort == 1883) {
     mqttPort = 8883;
@@ -2428,21 +1617,13 @@ static void applyMqttRuntimeConfig() {
     mqttPort = 1883;
   }
   if (mqttUseTls) {
-    mqttSecureClientRef().setInsecure();
-    mqttClient.setClient(mqttSecureClientRef());
+    mqttSecureClient.setInsecure();
+    mqttClient.setClient(mqttSecureClient);
   } else {
     mqttClient.setClient(mqttPlainClient);
   }
-  if (WiFi.status() == WL_CONNECTED) {
-    IPAddress ip;
-    if (WiFi.hostByName(mqttHost.c_str(), ip) == 1) {
-      mqttClient.setServer(ip, mqttPort);
-      if (locked) mqttUnlock();
-      return;
-    }
-  }
   mqttClient.setServer(mqttHost.c_str(), mqttPort);
-  if (locked) mqttUnlock();
+  mqttUnlock();
 }
 
 // Constantes - Pinos de SAÃDA (relÃ©s e indicadores)
@@ -2516,108 +1697,6 @@ static void buzzerTestTick() {
   }
 }
 
-static void buzzerPulseStart2s() {
-  buzzerTestEnabled = true;
-  buzzerTestIsOn = false;
-  buzzerTestNextOnMs = millis();
-  buzzerTestOffAtMs = 0;
-}
-
-static void buzzerPulseStop() {
-  buzzerTestEnabled = false;
-  digitalWrite(BUZZER, LOW);
-  buzzerTestIsOn = false;
-}
-
-static void beepSeqStart(uint8_t count, uint16_t onMs, uint16_t offMs) {
-  if (count == 0) return;
-  beepSeqRestorePulse = buzzerTestEnabled;
-  buzzerPulseStop();
-  beepSeqActive = true;
-  beepSeqRemaining = count;
-  beepSeqBuzzerOn = false;
-  beepSeqOnMs = onMs;
-  beepSeqOffMs = offMs;
-  beepSeqNextMs = millis();
-}
-
-static void beepSeqTick() {
-  if (!beepSeqActive) return;
-  uint32_t now = millis();
-  if (static_cast<int32_t>(now - beepSeqNextMs) < 0) return;
-  if (!beepSeqBuzzerOn) {
-    digitalWrite(BUZZER, HIGH);
-    beepSeqBuzzerOn = true;
-    beepSeqNextMs = now + beepSeqOnMs;
-    return;
-  }
-  digitalWrite(BUZZER, LOW);
-  beepSeqBuzzerOn = false;
-  if (beepSeqRemaining > 0) {
-    beepSeqRemaining--;
-  }
-  if (beepSeqRemaining == 0) {
-    beepSeqActive = false;
-    if (beepSeqRestorePulse) {
-      buzzerPulseStart2s();
-    }
-    return;
-  }
-  beepSeqNextMs = now + beepSeqOffMs;
-}
-
-static void alarmTick() {
-  if (!audibleErrorBeeps) return;
-  if (beepSeqActive) return;
-  if (buzzerTestEnabled) return;
-  uint32_t now = millis();
-  if (bootStartedAtMs == 0) {
-    bootStartedAtMs = now;
-  }
-
-  bool wifiConnected = (WiFi.status() == WL_CONNECTED);
-  bool mqttConnected = mqttClient.connected();
-
-  if (wifiConnected) {
-    if (wifiOkAtMs == 0) wifiOkAtMs = now;
-    wifiLostAtMs = 0;
-  } else if (wifiOkAtMs != 0) {
-    if (wifiLostAtMs == 0) wifiLostAtMs = now;
-  }
-
-  if (mqttConnected) {
-    if (mqttOkAtMs == 0) mqttOkAtMs = now;
-    mqttLostAtMs = 0;
-  } else if (mqttOkAtMs != 0) {
-    if (mqttLostAtMs == 0) mqttLostAtMs = now;
-  }
-
-  if (alarmNextMs != 0 && static_cast<int32_t>(now - alarmNextMs) < 0) {
-    return;
-  }
-
-  if (!wifiConnected) {
-    if ((now - bootStartedAtMs) > 45000 || (wifiLostAtMs != 0 && (now - wifiLostAtMs) > 60000)) {
-      beepSeqStart(3, 400, 150);
-      alarmNextMs = now + 10000;
-    }
-    return;
-  }
-
-  if (!mqttConnected) {
-    if ((wifiOkAtMs != 0 && (now - wifiOkAtMs) > 45000) || (mqttLostAtMs != 0 && (now - mqttLostAtMs) > 60000)) {
-      beepSeqStart(3, 400, 150);
-      alarmNextMs = now + 10000;
-    }
-    return;
-  }
-
-  if (supabaseOkAtMs == 0 && supabaseFailAtMs != 0 && (now - supabaseFailAtMs) > 60000) {
-    beepSeqStart(3, 400, 150);
-    alarmNextMs = now + 10000;
-  }
-}
-
 static const char* relayLabelByPin(int pin) {
   if (pin == Rele_SA) return "RELE_SA";
   if (pin == Rele_DA) return "RELE_DA";
@@ -2633,126 +1712,14 @@ static const char* relayLabelByPin(int pin) {
   return "GPIO";
 }
 
-#ifndef RELE_DP_ACTIVE_LOW
-#define RELE_DP_ACTIVE_LOW 0
-#endif
-
-static inline int relayLevelForWrite(int pin, bool on) {
-  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
-    return on ? LOW : HIGH;
-  }
-  return on ? HIGH : LOW;
-}
-
-static inline bool relayIsOn(int pin) {
-  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
-    return digitalRead(pin) == LOW;
-  }
-  return digitalRead(pin) == HIGH;
-}
-
-static const int kRelayTrackPins[] = {
-  Rele_SA,
-  Rele_DA,
-  Rele_SE,
-  Rele_DE,
-  Rele_SP,
-  Rele_DP,
-  Rele_refletor,
-  Rele_TREND_SOBE,
-  Rele_TREND_DESCE,
-};
-
-static bool relayTrackLastOn[sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])] = {};
-static uint32_t relayTrackOnSinceMs[sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])] = {};
-static char relayTrackLastSrc[sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])][16] = {};
-
-static int relayTrackIndexForPin(int pin) {
-  for (size_t i = 0; i < (sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])); i++) {
-    if (kRelayTrackPins[i] == pin) return static_cast<int>(i);
-  }
-  return -1;
-}
-
-static void relayTrackNote(int pin, bool on, const char* src) {
-  int idx = relayTrackIndexForPin(pin);
-  if (idx < 0) return;
-  if (kRelayTrackPins[idx] < 0) return;
-
-  if (src && src[0] != '\0') {
-    snprintf(relayTrackLastSrc[idx], sizeof(relayTrackLastSrc[idx]), "%s", src);
-  }
-
-  bool isOnNow = relayIsOn(pin);
-  if (isOnNow && !relayTrackLastOn[idx]) {
-    relayTrackOnSinceMs[idx] = millis();
-  } else if (!isOnNow) {
-    relayTrackOnSinceMs[idx] = 0;
-  }
-  relayTrackLastOn[idx] = isOnNow;
-}
-
-static void relayTrackInitSnapshot() {
-  for (size_t i = 0; i < (sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])); i++) {
-    int pin = kRelayTrackPins[i];
-    if (pin < 0) {
-      relayTrackLastOn[i] = false;
-      relayTrackOnSinceMs[i] = 0;
-      relayTrackLastSrc[i][0] = '\0';
-      continue;
-    }
-    bool onNow = relayIsOn(pin);
-    relayTrackLastOn[i] = onNow;
-    relayTrackOnSinceMs[i] = onNow ? millis() : 0;
-    relayTrackLastSrc[i][0] = '\0';
-  }
-}
-
-static void relayTrackPrintOnRelays(const char* tag) {
-  uint32_t now = millis();
-  Serial.print("[RELAY] ");
-  if (tag && tag[0] != '\0') {
-    Serial.print(tag);
-    Serial.print(" ");
-  }
-  bool any = false;
-  for (size_t i = 0; i < (sizeof(kRelayTrackPins) / sizeof(kRelayTrackPins[0])); i++) {
-    int pin = kRelayTrackPins[i];
-    if (pin < 0) continue;
-    bool onNow = relayIsOn(pin);
-    if (!onNow) continue;
-    uint32_t since = relayTrackOnSinceMs[i];
-    uint32_t dur = (since != 0 && now >= since) ? (now - since) : 0;
-    Serial.print(any ? " | " : "");
-    any = true;
-    Serial.print(relayLabelByPin(pin));
-    Serial.print("(GPIO");
-    Serial.print(pin);
-    Serial.print(")");
-    Serial.print(" RB=");
-    Serial.print(digitalRead(pin) == HIGH ? "1" : "0");
-    Serial.print(" ON=1");
-    Serial.print(" T=");
-    Serial.print(dur);
-    Serial.print(" SRC=");
-    Serial.print(relayTrackLastSrc[i][0] ? relayTrackLastSrc[i] : "?");
-  }
-  if (!any) {
-    Serial.print("NONE");
-  }
-  Serial.println();
-}
-
 static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
-  int newValue = relayLevelForWrite(pin, on);
+  int newValue = on ? HIGH : LOW;
   int oldValue = digitalRead(pin);
   if (oldValue == newValue) {
-    relayTrackNote(pin, on, src);
     return;
   }
   digitalWrite(pin, newValue);
   int readBack = digitalRead(pin);
-  relayTrackNote(pin, on, src);
   if (pin == Rele_SA || pin == Rele_DA || pin == Rele_SE || pin == Rele_DE || pin == Rele_SP || pin == Rele_DP || pin == Rele_refletor || pin == Rele_TREND_SOBE || pin == Rele_TREND_DESCE) {
     mqttStatusDirty = true;
   }
@@ -2767,11 +1734,6 @@ static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
   Serial.print(on ? "1" : "0");
   Serial.print(" RB=");
   Serial.print(readBack == HIGH ? "1" : "0");
-  Serial.print(" ON=");
-  Serial.print(relayIsOn(pin) ? "1" : "0");
-  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
-    Serial.print(" ALOW=1");
-  }
   if (src && src[0] != '\0') {
     Serial.print(" ");
     Serial.print(src);
@@ -2871,77 +1833,24 @@ bool faz_bt_seg = 0;
 volatile uint32_t pulses_encosto = 0;
 volatile uint32_t pulses_assento = 0;
 volatile uint32_t pulses_perneira = 0;
-volatile uint32_t pulses_trend = 0;
 static uint32_t last_pulses_encosto = 0;
 static uint32_t last_pulses_assento = 0;
 static uint32_t last_pulses_perneira = 0;
-static uint32_t last_pulses_trend = 0;
-static uint32_t trendLastPulseAtMs = 0;
-static uint32_t last_pulses_trend_travel = 0;
 
 static uint64_t motorTravelPulsesEncosto = 0;
 static uint64_t motorTravelPulsesAssento = 0;
 static uint64_t motorTravelPulsesPerneira = 0;
-static uint64_t motorTravelPulsesTrend = 0;
 static uint64_t motorTravelUnsavedEncosto = 0;
 static uint64_t motorTravelUnsavedAssento = 0;
 static uint64_t motorTravelUnsavedPerneira = 0;
-static uint64_t motorTravelUnsavedTrend = 0;
 static float mmPerPulseEncosto = 0.01f;
 static float mmPerPulseAssento = 0.01f;
 static float mmPerPulsePerneira = 0.01f;
-static float mmPerPulseTrend = 0.01f;
 static uint32_t motorTravelNextSaveMs = 0;
 static uint32_t motorTravelNextSendMs = 0;
 static const uint32_t MOTOR_TRAVEL_SAVE_INTERVAL_MS = 10000;
 static const uint32_t MOTOR_TRAVEL_SEND_INTERVAL_MS = 900000;
 static bool encoderPulseDebug = false;
-static bool pulsePrintEnabled = false;
-static uint32_t pulsePrintLastTrend = 0;
-static uint32_t pulsePrintLastEncosto = 0;
-static uint32_t pulsePrintLastAssento = 0;
-static uint32_t pulsePrintLastPerneira = 0;
-static bool encoderMonEnabled = false;
-static uint32_t encoderMonNextMs = 0;
-static uint32_t encoderMonLastEnc = 0;
-static uint32_t encoderMonLastAss = 0;
-static uint32_t encoderMonLastPer = 0;
-static uint32_t encoderMonLastTrend = 0;
-
-static inline void encoderMonResetCounters() {
-  encoderMonLastEnc = pulses_encosto;
-  encoderMonLastAss = pulses_assento;
-  encoderMonLastPer = pulses_perneira;
-  encoderMonLastTrend = pulses_trend;
-}
-
-static void encoderMonTick() {
-  if (!encoderMonEnabled) return;
-  uint32_t now = millis();
-  if (static_cast<int32_t>(now - encoderMonNextMs) < 0) return;
-  encoderMonNextMs = now + 500;
-  uint32_t pe = pulses_encosto;
-  uint32_t pa = pulses_assento;
-  uint32_t pp = pulses_perneira;
-  uint32_t pt = pulses_trend;
-  uint32_t de = pe - encoderMonLastEnc;
-  uint32_t da = pa - encoderMonLastAss;
-  uint32_t dp = pp - encoderMonLastPer;
-  uint32_t dt = pt - encoderMonLastTrend;
-  encoderMonLastEnc = pe;
-  encoderMonLastAss = pa;
-  encoderMonLastPer = pp;
-  encoderMonLastTrend = pt;
-
-  Serial.print("[ENC_MON] ENC(GPIO"); Serial.print(ENCODER3); Serial.print(") L="); Serial.print(ENCODER3 >= 0 ? (digitalRead(ENCODER3) == HIGH ? "1" : "0") : "NA");
-  Serial.print(" P="); Serial.print(pe); Serial.print(" d="); Serial.print(de);
-  Serial.print(" | ASS(GPIO"); Serial.print(ENCODER1); Serial.print(") L="); Serial.print(ENCODER1 >= 0 ? (digitalRead(ENCODER1) == HIGH ? "1" : "0") : "NA");
-  Serial.print(" P="); Serial.print(pa); Serial.print(" d="); Serial.print(da);
-  Serial.print(" | PER(GPIO"); Serial.print(ENCODER2); Serial.print(") L="); Serial.print(ENCODER2 >= 0 ? (digitalRead(ENCODER2) == HIGH ? "1" : "0") : "NA");
-  Serial.print(" P="); Serial.print(pp); Serial.print(" d="); Serial.print(dp);
-  Serial.print(" | TREND(GPIO"); Serial.print(ENCODER_TREND); Serial.print(") L="); Serial.print(ENCODER_TREND >= 0 ? (digitalRead(ENCODER_TREND) == HIGH ? "1" : "0") : "NA");
-  Serial.print(" P="); Serial.print(pt); Serial.print(" d="); Serial.println(dt);
-}
 
 // Mapeamento solicitado:
 // ENCODER1 -> Assento
@@ -2950,7 +1859,6 @@ static void encoderMonTick() {
 static void IRAM_ATTR isr_encoder1() { pulses_assento++; }
 static void IRAM_ATTR isr_encoder2() { pulses_perneira++; }
 static void IRAM_ATTR isr_encoder3() { pulses_encosto++; }
-static void IRAM_ATTR isr_encoder_trend() { pulses_trend++; }
 
 // Debounce para comandos BLE
 unsigned long ultimoComandoBLE = 0;
@@ -3000,8 +1908,6 @@ void monitoraSistema();
 
 // ========== SETUP ==========
 void setup() {
-  setupBrownoutDetector();
-  bootStartedAtMs = millis();
   // WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Desabilita detector de Brownout - not needed in Arduino
   setCpuFrequencyMhz(80); // Reduz frequÃªncia para 80MHz durante inicializaÃ§Ã£o
   
@@ -3100,48 +2006,27 @@ void setup() {
   pinMode(DP, INPUT_PULLUP);
   pinMode(M1, INPUT_PULLUP);
   if (TREN_INT_DESCE >= 0) {
-    pinMode(TREN_INT_DESCE, TREND_INPUT_MODE);
+    pinMode(TREN_INT_DESCE, INPUT_PULLUP);
     Serial.print("[TREND] TREN_INT_DESCE(GPIO");
     Serial.print(TREN_INT_DESCE);
-    Serial.print(") INIT=");
-    Serial.println(digitalRead(TREN_INT_DESCE) == HIGH ? 1 : 0);
+    Serial.println(")");
   }
   if (INT_TREND_DESCE >= 0) {
-    pinMode(INT_TREND_DESCE, TREND_INPUT_MODE);
+    pinMode(INT_TREND_DESCE, INPUT_PULLUP);
     Serial.print("[TREND] INT_TREND_DESCE(GPIO");
     Serial.print(INT_TREND_DESCE);
-    Serial.print(") INIT=");
-    Serial.println(digitalRead(INT_TREND_DESCE) == HIGH ? 1 : 0);
-  }
-  if (TREN_INT_SOBE >= 0) {
-    pinMode(TREN_INT_SOBE, TREND_INPUT_MODE);
-    Serial.print("[TREND] TREN_INT_SOBE(GPIO");
-    Serial.print(TREN_INT_SOBE);
-    Serial.print(") INIT=");
-    Serial.println(digitalRead(TREN_INT_SOBE) == HIGH ? 1 : 0);
-  }
-  if (INT_TREND_SOBE >= 0) {
-    pinMode(INT_TREND_SOBE, TREND_INPUT_MODE);
-    Serial.print("[TREND] INT_TREND_SOBE(GPIO");
-    Serial.print(INT_TREND_SOBE);
-    Serial.print(") INIT=");
-    Serial.println(digitalRead(INT_TREND_SOBE) == HIGH ? 1 : 0);
+    Serial.println(")");
   }
   if (GAVETA >= 0) {
     pinMode(GAVETA, INPUT_PULLUP);
     Serial.print("[GAVETA] GPIO=");
     Serial.println(GAVETA);
-    gavetaIdleLevel = digitalRead(GAVETA);
   } else {
     Serial.println("[GAVETA] DESABILITADO");
-    gavetaIdleLevel = -1;
   }
   pinMode(ENCODER1, INPUT_PULLUP);
   pinMode(ENCODER2, INPUT_PULLUP);
   pinMode(ENCODER3, INPUT_PULLUP);
-  if (ENCODER_TREND >= 0) {
-    pinMode(ENCODER_TREND, INPUT_PULLUP);
-  }
   if (TEST_MODE) {
     Serial.println("[ENC] TEST_MODE=1: interrupcoes de encoder desabilitadas");
   } else {
@@ -3160,11 +2045,6 @@ void setup() {
     } else {
       Serial.println("[ENC] ENCODER3 desabilitado");
     }
-    if (ENCODER_TREND >= 0 && ENCODER_TREND != I2C_SDA && ENCODER_TREND != I2C_SCL && ENCODER_TREND != Rele_refletor) {
-      attachInterrupt(digitalPinToInterrupt(ENCODER_TREND), isr_encoder_trend, FALLING);
-    } else {
-      Serial.println("[ENC] ENCODER_TREND desabilitado");
-    }
   }
 
   // Inicializa pinos de saÃ­da
@@ -3175,7 +2055,6 @@ void setup() {
   pinMode(Rele_DP, OUTPUT);
   pinMode(Rele_SP, OUTPUT);
   pinMode(BUZZER, OUTPUT);
-  digitalWrite(BUZZER, LOW);
   pinMode(LED, OUTPUT);
   pinMode(Rele_refletor, OUTPUT);
   if (Rele_TREND_DESCE >= 0) pinMode(Rele_TREND_DESCE, OUTPUT);
@@ -3191,7 +2070,6 @@ void setup() {
   setOutputPin(Rele_refletor, false, nullptr, false);
   if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, nullptr, false);
   if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, nullptr, false);
-  relayTrackInitSnapshot();
   Serial.println("Pinos configurados.");
   delay(500);
 
@@ -3222,6 +2100,15 @@ void setup() {
   return;
 #endif
 
+  // ===== EXECUTA VZ INICIAL ANTES DE TUDO =====
+  Serial.println("\n====================================");
+  Serial.println("  EXECUTANDO VZ INICIAL");
+  Serial.println("  (ANTES de WiFi e Bluetooth)");
+  Serial.println("====================================");
+  executa_vz_ini();
+  Serial.println("[OK] VZ inicial finalizado.");
+  Serial.println("====================================\n");
+  delay(1000);
   Serial.println("Inicio programa cadeira GO - Com WiFiManager + Supabase");
 
   // Carrega dados salvos (encoder virtual e horÃ­metro)
@@ -3240,8 +2127,6 @@ void setup() {
 
   // Inicializa MQTT se WiFi estiver conectado
   if (WiFi.status() == WL_CONNECTED) {
-    mqttConnectEnabled = false;
-    mqttReadyAtMs = 0;
     Serial.println("\n====================================");
     Serial.println("  INICIALIZANDO MQTT");
     Serial.println("====================================");
@@ -3270,7 +2155,7 @@ void setup() {
     mqttTxQueue = xQueueCreate(8, sizeof(MqttTxItem));
   }
   if (!mqttTaskHandle) {
-    xTaskCreatePinnedToCore(mqttTaskMain, "mqtt", 24576, NULL, 1, &mqttTaskHandle, 1);
+    xTaskCreatePinnedToCore(mqttTaskMain, "mqtt", 12288, NULL, 0, &mqttTaskHandle, 0);
   }
   otaValidateAfterBoot();
 
@@ -3281,14 +2166,6 @@ void setup() {
   // Sincroniza horário com servidor NTP
   if (WiFi.status() == WL_CONNECTED) {
     sincronizaNTP();
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    uint32_t waitUntil = millis() + 12000;
-    while (!mqttClient.connected() && static_cast<int32_t>(millis() - waitUntil) < 0) {
-      reconnectMQTT();
-      delay(200);
-    }
   }
 
   Serial.println("\n====================================");
@@ -3312,19 +2189,6 @@ void setup() {
     Serial.println("WiFi Status: DESCONECTADO");
     Serial.println("[INFO] Pulando verificacao inicial - modo offline.");
   }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    mqttConnectEnabled = true;
-    mqttReadyAtMs = millis() + 1000;
-  }
-
-  Serial.println("\n====================================");
-  Serial.println("  EXECUTANDO VZ INICIAL");
-  Serial.println("  (APOS WiFi/MQTT/Supabase)");
-  Serial.println("====================================");
-  executa_vz_ini();
-  Serial.println("[OK] VZ inicial finalizado.");
-  Serial.println("====================================\n");
   
   Serial.println("\n====================================");
   Serial.println("       SISTEMA PRONTO!");
@@ -3339,283 +2203,15 @@ void setup() {
   Serial.print(ESP.getFreeHeap());
   Serial.println(" bytes");
   Serial.println("====================================");
-}
-
-static bool trendInputsConfigured() {
-  return TREN_INT_DESCE >= 0 || INT_TREND_DESCE >= 0 || TREN_INT_SOBE >= 0 || INT_TREND_SOBE >= 0;
-}
-
-static bool trendReadDebouncedHigh(int pin, bool& initialized, bool& raw, bool& stable, uint32_t& changedAtMs) {
-  static const uint32_t TREND_DEBOUNCE_MS = 10;
-  if (pin < 0) {
-    return false;
-  }
-  static int8_t idleLevelByPin[49];
-  static bool idleInit = false;
-  if (!idleInit) {
-    for (size_t i = 0; i < sizeof(idleLevelByPin); i++) {
-      idleLevelByPin[i] = -1;
-    }
-    idleInit = true;
-  }
-  uint32_t now = millis();
-  bool cur = digitalRead(pin);
-  bool idleLevel = true;
-  if (pin >= 0 && pin < static_cast<int>(sizeof(idleLevelByPin))) {
-    if (idleLevelByPin[pin] == -1) {
-      idleLevelByPin[pin] = cur ? 1 : 0;
-    }
-    idleLevel = (idleLevelByPin[pin] != 0);
-  }
-  if (!initialized) {
-    initialized = true;
-    raw = cur;
-    stable = cur;
-    changedAtMs = now;
-    return stable != idleLevel;
-  }
-  if (cur != raw) {
-    raw = cur;
-    changedAtMs = now;
-  }
-  if ((now - changedAtMs) < TREND_DEBOUNCE_MS) {
-    return stable != idleLevel;
-  }
-  stable = raw;
-  return stable != idleLevel;
-}
-
-static void trendDebugDump(const char* tag) {
-  bool hasUpPins = (TREN_INT_SOBE >= 0 || INT_TREND_SOBE >= 0);
-  bool mapUpRaw = false;
-  bool mapDownRaw = false;
-  if (hasUpPins) {
-    if (TREN_INT_SOBE >= 0 && digitalRead(TREN_INT_SOBE) == HIGH) mapUpRaw = true;
-    if (INT_TREND_SOBE >= 0 && digitalRead(INT_TREND_SOBE) == HIGH) mapUpRaw = true;
-  } else {
-    if (INT_TREND_DESCE >= 0 && digitalRead(INT_TREND_DESCE) == HIGH) mapUpRaw = true;
-  }
-  if (TREN_INT_DESCE >= 0 && digitalRead(TREN_INT_DESCE) == HIGH) mapDownRaw = true;
-
-  String msg = "[TREND_DBG] ";
-  msg += (tag ? tag : "DUMP");
-  msg += " GPIO_IN{";
-  msg += "TREN_D=";
-  msg += (TREN_INT_DESCE >= 0 ? String(digitalRead(TREN_INT_DESCE) == HIGH ? 1 : 0) : "NA");
-  msg += ",INT_D=";
-  msg += (INT_TREND_DESCE >= 0 ? String(digitalRead(INT_TREND_DESCE) == HIGH ? 1 : 0) : "NA");
-  msg += ",TREN_U=";
-  msg += (TREN_INT_SOBE >= 0 ? String(digitalRead(TREN_INT_SOBE) == HIGH ? 1 : 0) : "NA");
-  msg += ",INT_U=";
-  msg += (INT_TREND_SOBE >= 0 ? String(digitalRead(INT_TREND_SOBE) == HIGH ? 1 : 0) : "NA");
-  msg += "} GPIO_OUT{";
-  msg += "D=";
-  msg += (Rele_TREND_DESCE >= 0 ? String(digitalRead(Rele_TREND_DESCE) == HIGH ? 1 : 0) : "NA");
-  msg += ",U=";
-  msg += (Rele_TREND_SOBE >= 0 ? String(digitalRead(Rele_TREND_SOBE) == HIGH ? 1 : 0) : "NA");
-  msg += "} STATE{";
-  msg += "upOn=";
-  msg += (estado_trend_sobe ? "1" : "0");
-  msg += ",downOn=";
-  msg += (estado_trend_desce ? "1" : "0");
-  msg += "} MAP{";
-  msg += "U=";
-  msg += (mapUpRaw ? "1" : "0");
-  msg += ",D=";
-  msg += (mapDownRaw ? "1" : "0");
-  msg += "}";
-  Serial.println(msg);
-}
-
-static void trendDebugTick() {
-  if (!trendDebugEnabled) {
-    return;
-  }
-  uint32_t now = millis();
-  if (now < trendDebugNextMs) {
-    return;
-  }
-  trendDebugNextMs = now + trendDebugIntervalMs;
-  trendDebugDump("TICK");
-}
-
-static void trendTickInputs() {
-  if (!trendInputsConfigured()) {
-    return;
-  }
-  if (Rele_TREND_SOBE < 0 && Rele_TREND_DESCE < 0) {
-    return;
-  }
-
-  static const uint32_t TREND_GPIO_PRINT_STABLE_MS = 50;
-  uint32_t nowDbg = millis();
-
-  static int8_t idleLevelByPin[49];
-  static int8_t lastRawByPin[49];
-  static uint32_t activeSinceByPin[49];
-  static bool printedByPin[49];
-  static bool initByPin = false;
-  if (!initByPin) {
-    for (size_t i = 0; i < sizeof(idleLevelByPin); i++) {
-      idleLevelByPin[i] = -1;
-      lastRawByPin[i] = -1;
-      activeSinceByPin[i] = 0;
-      printedByPin[i] = false;
-    }
-    initByPin = true;
-  }
-
-  auto tickAcionado = [&](int pin) {
-    if (pin < 0 || pin >= static_cast<int>(sizeof(idleLevelByPin))) {
-      return;
-    }
-    int raw = digitalRead(pin) == HIGH ? 1 : 0;
-    if (idleLevelByPin[pin] == -1) {
-      idleLevelByPin[pin] = raw;
-      lastRawByPin[pin] = raw;
-      activeSinceByPin[pin] = 0;
-      printedByPin[pin] = false;
-      return;
-    }
-    bool active = (raw != idleLevelByPin[pin]);
-    if (active) {
-      if (lastRawByPin[pin] == idleLevelByPin[pin]) {
-        activeSinceByPin[pin] = nowDbg;
-        printedByPin[pin] = false;
-      }
-      if (!printedByPin[pin] && activeSinceByPin[pin] > 0 && (nowDbg - activeSinceByPin[pin]) >= TREND_GPIO_PRINT_STABLE_MS) {
-        Serial.print("GPIO ");
-        Serial.print(pin);
-        Serial.println(" ACIONADO");
-        printedByPin[pin] = true;
-      }
-    } else {
-      activeSinceByPin[pin] = 0;
-      printedByPin[pin] = false;
-    }
-    lastRawByPin[pin] = raw;
-  };
-
-  tickAcionado(TREN_INT_DESCE);
-  tickAcionado(INT_TREND_DESCE);
-  tickAcionado(TREN_INT_SOBE);
-  tickAcionado(INT_TREND_SOBE);
-  tickAcionado(GAVETA);
-
-  auto isActiveStable = [&](int pin) -> bool {
-    if (pin < 0 || pin >= static_cast<int>(sizeof(idleLevelByPin))) {
-      return false;
-    }
-    if (idleLevelByPin[pin] == -1) {
-      return false;
-    }
-    uint32_t since = activeSinceByPin[pin];
-    if (since == 0) {
-      return false;
-    }
-    return (nowDbg - since) >= TREND_GPIO_PRINT_STABLE_MS;
-  };
-
-  bool hasUpPins = (TREN_INT_SOBE >= 0 || INT_TREND_SOBE >= 0);
-  bool up = false;
-  if (hasUpPins) {
-    up = isActiveStable(TREN_INT_SOBE) || isActiveStable(INT_TREND_SOBE);
-  } else {
-    up = isActiveStable(INT_TREND_DESCE);
-  }
-
-  bool down = isActiveStable(TREN_INT_DESCE);
-
-  static bool lastConflict = false;
-  bool conflict = up && down;
-  if (conflict) {
-    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_IN");
-    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_IN");
-    estado_trend_sobe = false;
-    estado_trend_desce = false;
-    faz_bt_seg = 0;
-    paraTimerMotor();
-    if (!lastConflict) {
-      enviarBLE("TREND:CONFLICT");
-      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_CONFLICT", false);
-      mqttStatusDirty = true;
-    }
-    lastConflict = true;
-    return;
-  }
-  lastConflict = false;
-
-  if (up) {
-    uint32_t now = millis();
-    ultimoComandoTrendSobe = now;
-    trendLastPulseAtMs = now;
-    last_pulses_trend = pulses_trend;
-
-    if (!estado_trend_sobe) {
-      if (estado_trend_desce) {
-        if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_IN");
-        estado_trend_desce = false;
-        mqttStatusDirty = true;
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_DOWN_OFF", false);
-      }
-      estado_trend_sobe = true;
-      if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, true, "TREND_IN");
-      faz_bt_seg = 1;
-      iniciaTimerMotor();
-      mqttStatusDirty = true;
-      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_UP_ON", false);
-    }
-    return;
-  }
-
-  if (down) {
-    uint32_t now = millis();
-    ultimoComandoTrendDesce = now;
-    trendLastPulseAtMs = now;
-    last_pulses_trend = pulses_trend;
-
-    if (!estado_trend_desce) {
-      if (estado_trend_sobe) {
-        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_IN");
-        estado_trend_sobe = false;
-        mqttStatusDirty = true;
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_UP_OFF", false);
-      }
-      estado_trend_desce = true;
-      if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, true, "TREND_IN");
-      faz_bt_seg = 1;
-      iniciaTimerMotor();
-      mqttStatusDirty = true;
-      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_DOWN_ON", false);
-    }
-    return;
-  }
-
-  if (estado_trend_sobe || estado_trend_desce) {
-    bool wasUp = estado_trend_sobe;
-    bool wasDown = estado_trend_desce;
-    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_IN");
-    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_IN");
-    estado_trend_sobe = false;
-    estado_trend_desce = false;
-    faz_bt_seg = 0;
-    paraTimerMotor();
-    mqttStatusDirty = true;
-    enviarBLE("TREND:OFF");
-    if (wasUp) mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_UP_OFF", false);
-    if (wasDown) mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_DOWN_OFF", false);
-    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_OFF", false);
-  }
+  
+  bip();
+  delay(100);
+  bip();
 }
 
 // ========== MONITORAMENTO DE TIMEOUT DOS MOTORES (DEAD MAN'S SWITCH) ==========
 void verificaTimeoutMotores() {
   unsigned long agora = millis();
-  uint32_t curTrend = pulses_trend;
-  if (curTrend != last_pulses_trend) {
-    last_pulses_trend = curTrend;
-    trendLastPulseAtMs = agora;
-  }
   
   // SE - Encosto sobe
   if (estado_se && (agora - ultimoComandoSE) > MOTOR_TIMEOUT) {
@@ -3672,14 +2268,7 @@ void verificaTimeoutMotores() {
   }
 
   // TS - Trend sobe
-  bool tsInputActive = false;
-  if (TREN_INT_SOBE >= 0 || INT_TREND_SOBE >= 0) {
-    if (TREN_INT_SOBE >= 0 && digitalRead(TREN_INT_SOBE) == HIGH) tsInputActive = true;
-    if (INT_TREND_SOBE >= 0 && digitalRead(INT_TREND_SOBE) == HIGH) tsInputActive = true;
-  } else {
-    if (INT_TREND_DESCE >= 0 && digitalRead(INT_TREND_DESCE) == HIGH) tsInputActive = true;
-  }
-  if (estado_trend_sobe && !tsInputActive && (agora - ultimoComandoTrendSobe) > MOTOR_TIMEOUT) {
+  if (estado_trend_sobe && (agora - ultimoComandoTrendSobe) > MOTOR_TIMEOUT) {
     estado_trend_sobe = false;
     if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TIMEOUT");
     faz_bt_seg = 0;
@@ -3688,41 +2277,23 @@ void verificaTimeoutMotores() {
   }
 
   // TD - Trend desce
-  bool tdInputActive = false;
-  if (TREN_INT_DESCE >= 0 && digitalRead(TREN_INT_DESCE) == HIGH) tdInputActive = true;
-  if (estado_trend_desce && !tdInputActive && (agora - ultimoComandoTrendDesce) > MOTOR_TIMEOUT) {
+  if (estado_trend_desce && (agora - ultimoComandoTrendDesce) > MOTOR_TIMEOUT) {
     estado_trend_desce = false;
     if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TIMEOUT");
     faz_bt_seg = 0;
     enviarBLE("TD:TIMEOUT");
     Serial.println("[TIMEOUT] Motor TD desligado por seguranca");
   }
-
-  if ((estado_trend_sobe || estado_trend_desce) && ENCODER_TREND >= 0 && trendLastPulseAtMs > 0 && (agora - trendLastPulseAtMs) > 500) {
-    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_ENC");
-    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_ENC");
-    estado_trend_sobe = false;
-    estado_trend_desce = false;
-    faz_bt_seg = 0;
-    enviarBLE("TREND:STALL");
-    Serial.println("[TREND_ENC] Sem pulsos. Trend desligado por seguranca");
-  }
 }
 
 // ========== LOOP PRINCIPAL ==========
 void loop() {
-  if (powerFailDetected) {
-    // Queda de energia detectada! Salva apenas as posições dos encoders imediatamente.
-    saveMotorTravelPreferences(true);
-    Serial.println("\n[AVISO] QUEDA DE ENERGIA! Posicoes salvas.");
-    while(1) { delay(1000); } // Aguarda o desligamento total
-  }
 #if PORTS_ONLY || PORTS_VERIFY
   if (pcf8574InterruptPending) {
     bool okRead = false;
     uint8_t in = pcf8574ReadByte(static_cast<uint8_t>(PCF8574_ADDRESS), &okRead);
     if (okRead) {
-      pcf8574ReportChanges(pcf8574LastIn, in, "[PCF8574_INT]");
+      pcf8574ReportChanges(pcf8574LastIn, in);
       pcf8574LastIn = in;
     }
     pcf8574InterruptPending = false;
@@ -3733,7 +2304,6 @@ void loop() {
   Button_Seg();
   monitora_tempo_rele();
   contagem_tempo_incoder_virtual();
-  encoderMonTick();
 #endif
   delay(10);
   return;
@@ -3762,9 +2332,6 @@ void loop() {
       }
     }
   }
-  inputsDebugTick();
-  trendTickInputs();
-  trendDebugTick();
 
   // Monitoramento do sistema (Debug)
   monitoraSistema();
@@ -3781,11 +2348,8 @@ void loop() {
 
   // FunÃ§Ãµes originais de controle
   contagem_tempo_incoder_virtual();
-  encoderMonTick();
   Watch_Dog();
   buzzerTestTick();
-  beepSeqTick();
-  alarmTick();
   Button_Seg();
   Button_geral();
   monitora_tempo_rele();
@@ -3838,7 +2402,11 @@ void configuraWiFiManager() {
   if (!wifiManager.autoConnect(NOME_DISPOSITIVO.c_str(), SENHA_AP)) {
     Serial.println("[WiFi] Falha na conexÃ£o - timeout");
     Serial.println("[WiFi] Continuando em modo offline...");
-    wifiLostAtMs = millis();
+    
+    // 3 bips indicam falha
+    bip(); delay(200);
+    bip(); delay(200);
+    bip();
   } else {
     Serial.println("WiFi conectado!");
     Serial.print("IP: ");
@@ -3846,9 +2414,9 @@ void configuraWiFiManager() {
     Serial.print("SSID: ");
     Serial.println(WiFi.SSID());
     
+    // 2 bips indicam sucesso
+    bip(); delay(100);
     bip();
-    wifiOkAtMs = millis();
-    wifiLostAtMs = 0;
     supabaseLogUsage("WIFI_CONNECTED");
     #if !(PORTS_ONLY) && !(PORTS_VERIFY)
     iniciaCalibracaoSeNecessario();
@@ -4090,13 +2658,11 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     if (GAVETA >= 0) {
       pinMode(GAVETA, INPUT_PULLUP);
       lastButtonState_GAVETA = digitalRead(GAVETA);
-      gavetaIdleLevel = lastButtonState_GAVETA;
       saveGavetaPinPreference();
       Serial.print("[GAVETA] PIN=");
       Serial.println(GAVETA);
     } else {
       Serial.println("[GAVETA] DESABILITADO");
-      gavetaIdleLevel = -1;
     }
     return;
   }
@@ -4299,11 +2865,11 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("MQTT_BUSY");
       return;
     }
-    mqttHost = "broker.emqx.io";
-    mqttPort = 8883;
+    mqttHost = "test.mosquitto.org";
+    mqttPort = 1883;
     mqttUser = "";
     mqttPass = "";
-    mqttUseTls = true;
+    mqttUseTls = false;
     mqttClientId = "";
     mqttCleanSession = true;
     Preferences p;
@@ -4316,37 +2882,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     mqttUnlock();
     beepNetMqttOkDone = false;
     enviarBLE("MQTT_RESET:OK");
-    return;
-  }
-
-  if (cmd == "TLS_TEST") {
-    Serial.println("====================================");
-    Serial.println("             TLS_TEST               ");
-    Serial.println("====================================");
-    bool ok8883 = tlsHandshakeOnce(mqttHost, 8883);
-    bool ok8886 = tlsHandshakeOnce(mqttHost, 8886);
-    bool okCurrent = tlsHandshakeOnce(mqttHost, mqttPort);
-    enviarBLE(String("TLS_TEST:HOST:") + mqttHost + ":8883:" + (ok8883 ? "OK" : "FAIL") + ":8886:" + (ok8886 ? "OK" : "FAIL") + ":CUR:" + String(mqttPort) + ":" + (okCurrent ? "OK" : "FAIL"));
-    return;
-  }
-
-  if (cmd == "MQTT_RAW_TEST") {
-    Serial.println("====================================");
-    Serial.println("           MQTT_RAW_TEST            ");
-    Serial.println("====================================");
-    bool prevEnabled = mqttConnectEnabled;
-    mqttConnectEnabled = false;
-    if (mqttLockMs(200)) {
-      mqttClient.disconnect();
-      mqttUnlock();
-    }
-    delay(200);
-    String cid = mqttClientId.length() > 0 ? mqttClientId : ("ESP32-" + NUMERO_SERIE_CADEIRA);
-    bool ok8883 = mqttRawConnackOnce(mqttHost, 8883, cid);
-    bool ok8886 = mqttRawConnackOnce(mqttHost, 8886, cid);
-    bool okCurrent = mqttRawConnackOnce(mqttHost, mqttPort, cid);
-    mqttConnectEnabled = prevEnabled;
-    enviarBLE(String("MQTT_RAW_TEST:HOST:") + mqttHost + ":8883:" + (ok8883 ? "OK" : "FAIL") + ":8886:" + (ok8886 ? "OK" : "FAIL") + ":CUR:" + String(mqttPort) + ":" + (okCurrent ? "OK" : "FAIL"));
     return;
   }
 
@@ -4415,15 +2950,13 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     return;
   }
   if (cmd == "OTA_CHECK") {
+    if (supabaseChairId.length() == 0) {
+      verificaStatusCadeira();
+    }
     OtaInfo info;
-    ChairOtaInfo chair;
-    bool ok = otaFetchUpdateInfo(info, chair);
+    bool ok = otaFetchManifest(info);
     if (!ok) {
       enviarBLE("OTA:CHECK:FAIL");
-      return;
-    }
-    if (chair.found && !chair.enabled) {
-      enviarBLE("OTA:DISABLED");
       return;
     }
     if (!info.available) {
@@ -4435,6 +2968,9 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     return;
   }
   if (cmd.startsWith("OTA_APPLY=") || cmd.startsWith("OTA_APPLY:")) {
+    if (supabaseChairId.length() == 0) {
+      verificaStatusCadeira();
+    }
     int sep = cmdRaw.indexOf('=');
     if (sep < 0) sep = cmdRaw.indexOf(':');
     String url = cmdRaw.substring(sep + 1);
@@ -4467,84 +3003,13 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     return;
   }
 
-  if (cmd == "INPUT_DBG_ON") {
-    inputsDebugEnabled = true;
-    inputsDebugLastPollMs = 0;
-    lastGpioSa = -1;
-    lastGpioRf = -1;
-    lastGpioGaveta = -1;
-    lastGpioTrendInDesce = -1;
-    lastGpioTrendInSobe = -1;
-    lastGpioIntTrendDesce = -1;
-    lastGpioIntTrendSobe = -1;
-    lastGpioPcfInt = -1;
-#if USE_PCF8574
-    inputsDebugLastPcf = 0xFF;
-    inputsDebugLastIrqCount = pcf8574InterruptCount;
-#endif
-    Serial.println("[IN_DBG] ON");
-    return;
-  }
-  if (cmd == "INPUT_DBG_OFF") {
-    inputsDebugEnabled = false;
-    Serial.println("[IN_DBG] OFF");
-    return;
-  }
-  if (cmd == "INPUT_DBG_STATUS") {
-    Serial.print("[IN_DBG] ");
-    Serial.println(inputsDebugEnabled ? "ON" : "OFF");
-    return;
-  }
-
-  if (cmd == "RELAY_STATUS") { relayTrackPrintOnRelays("STATUS"); return; }
-
-  if (cmd == "TEST_SA") { ultimoComandoRemoto = millis(); setOutputPin(Rele_SA, true, "TEST"); delay(500); setOutputPin(Rele_SA, false, "TEST"); return; }
-  if (cmd == "TEST_DA") { ultimoComandoRemoto = millis(); setOutputPin(Rele_DA, true, "TEST"); delay(500); setOutputPin(Rele_DA, false, "TEST"); return; }
-  if (cmd == "TEST_SE") { ultimoComandoRemoto = millis(); setOutputPin(Rele_SE, true, "TEST"); delay(500); setOutputPin(Rele_SE, false, "TEST"); return; }
-  if (cmd == "TEST_DE") { ultimoComandoRemoto = millis(); setOutputPin(Rele_DE, true, "TEST"); delay(500); setOutputPin(Rele_DE, false, "TEST"); return; }
-  if (cmd == "TEST_SP") { ultimoComandoRemoto = millis(); setOutputPin(Rele_SP, true, "TEST"); delay(500); setOutputPin(Rele_SP, false, "TEST"); return; }
-  if (cmd == "TEST_DP") { ultimoComandoRemoto = millis(); setOutputPin(Rele_DP, true, "TEST"); delay(500); setOutputPin(Rele_DP, false, "TEST"); return; }
-  if (cmd == "TEST_RF") { ultimoComandoRemoto = millis(); setOutputPin(Rele_refletor, true, "TEST"); delay(500); setOutputPin(Rele_refletor, false, "TEST"); return; }
-
-  if (cmd == "ENC_STATUS") {
-    Serial.print("[ENC] ENCODER1(GPIO"); Serial.print(ENCODER1); Serial.print(") L="); Serial.println(ENCODER1 >= 0 ? (digitalRead(ENCODER1) == HIGH ? "1" : "0") : "NA");
-    Serial.print("[ENC] ENCODER2(GPIO"); Serial.print(ENCODER2); Serial.print(") L="); Serial.println(ENCODER2 >= 0 ? (digitalRead(ENCODER2) == HIGH ? "1" : "0") : "NA");
-    Serial.print("[ENC] ENCODER3(GPIO"); Serial.print(ENCODER3); Serial.print(") L="); Serial.println(ENCODER3 >= 0 ? (digitalRead(ENCODER3) == HIGH ? "1" : "0") : "NA");
-    Serial.print("[ENC] TREND(GPIO"); Serial.print(ENCODER_TREND); Serial.print(") L="); Serial.println(ENCODER_TREND >= 0 ? (digitalRead(ENCODER_TREND) == HIGH ? "1" : "0") : "NA");
-    Serial.print("[ENC] PULSES ENC="); Serial.print(pulses_encosto);
-    Serial.print(" ASS="); Serial.print(pulses_assento);
-    Serial.print(" PER="); Serial.print(pulses_perneira);
-    Serial.print(" TREND="); Serial.println(pulses_trend);
-    return;
-  }
-  if (cmd == "ENC_RESET") {
-    noInterrupts();
-    pulses_encosto = 0;
-    pulses_assento = 0;
-    pulses_perneira = 0;
-    pulses_trend = 0;
-    last_pulses_encosto = 0;
-    last_pulses_assento = 0;
-    last_pulses_perneira = 0;
-    last_pulses_trend = 0;
-    last_pulses_trend_travel = 0;
-    interrupts();
-    encoderMonResetCounters();
-    Serial.println("[ENC] RESET");
-    return;
-  }
-  if (cmd == "ENC_MON_ON") {
-    encoderMonEnabled = true;
-    encoderMonNextMs = 0;
-    encoderMonResetCounters();
-    Serial.println("[ENC_MON] ON");
-    return;
-  }
-  if (cmd == "ENC_MON_OFF") {
-    encoderMonEnabled = false;
-    Serial.println("[ENC_MON] OFF");
-    return;
-  }
+  if (cmd == "TEST_SA") { setOutputPin(Rele_SA, true, "TEST"); delay(500); setOutputPin(Rele_SA, false, "TEST"); return; }
+  if (cmd == "TEST_DA") { setOutputPin(Rele_DA, true, "TEST"); delay(500); setOutputPin(Rele_DA, false, "TEST"); return; }
+  if (cmd == "TEST_SE") { setOutputPin(Rele_SE, true, "TEST"); delay(500); setOutputPin(Rele_SE, false, "TEST"); return; }
+  if (cmd == "TEST_DE") { setOutputPin(Rele_DE, true, "TEST"); delay(500); setOutputPin(Rele_DE, false, "TEST"); return; }
+  if (cmd == "TEST_SP") { setOutputPin(Rele_SP, true, "TEST"); delay(500); setOutputPin(Rele_SP, false, "TEST"); return; }
+  if (cmd == "TEST_DP") { setOutputPin(Rele_DP, true, "TEST"); delay(500); setOutputPin(Rele_DP, false, "TEST"); return; }
+  if (cmd == "TEST_RF") { setOutputPin(Rele_refletor, true, "TEST"); delay(500); setOutputPin(Rele_refletor, false, "TEST"); return; }
 
   if (cmd == "PCF8574_INT") {
     Serial.print("[PCF8574] INT_PIN=");
@@ -4593,73 +3058,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     }
     return;
   }
-
-  if (cmd == "TREND_TEST") {
-    if (Rele_TREND_SOBE < 0 && Rele_TREND_DESCE < 0) {
-      enviarBLE("TREND_TEST:NA");
-      return;
-    }
-    enviarBLE("TREND_TEST:START");
-    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_TEST", false);
-
-    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_TEST");
-    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_TEST");
-    estado_trend_sobe = false;
-    estado_trend_desce = false;
-    mqttStatusDirty = true;
-    delay(200);
-
-    if (Rele_TREND_SOBE >= 0) {
-      estado_trend_sobe = true;
-      ultimoComandoTrendSobe = millis();
-      setOutputPin(Rele_TREND_SOBE, true, "TREND_TEST");
-      mqttStatusDirty = true;
-      delay(800);
-      setOutputPin(Rele_TREND_SOBE, false, "TREND_TEST");
-      estado_trend_sobe = false;
-      mqttStatusDirty = true;
-      delay(200);
-    }
-
-    if (Rele_TREND_DESCE >= 0) {
-      estado_trend_desce = true;
-      ultimoComandoTrendDesce = millis();
-      setOutputPin(Rele_TREND_DESCE, true, "TREND_TEST");
-      mqttStatusDirty = true;
-      delay(800);
-      setOutputPin(Rele_TREND_DESCE, false, "TREND_TEST");
-      estado_trend_desce = false;
-      mqttStatusDirty = true;
-      delay(200);
-    }
-
-    enviarBLE("TREND_TEST:DONE");
-    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_TEST_DONE", false);
-    return;
-  }
-
-  if (cmd == "TREND_DUMP") {
-    trendDebugDump("CMD");
-    enviarBLE("TREND_DUMP:OK");
-    return;
-  }
-
-  if (cmd.startsWith("TREND_DEBUG=") || cmd.startsWith("TREND_DEBUG:")) {
-    int sep = cmd.indexOf('=');
-    if (sep < 0) sep = cmd.indexOf(':');
-    String v = cmd.substring(sep + 1);
-    v.trim();
-    v.toUpperCase();
-    if (v == "1" || v == "ON" || v == "TRUE") {
-      trendDebugEnabled = true;
-    } else if (v == "0" || v == "OFF" || v == "FALSE") {
-      trendDebugEnabled = false;
-    }
-    trendDebugNextMs = 0;
-    enviarBLE(String("TREND_DEBUG:") + (trendDebugEnabled ? "ON" : "OFF"));
-    trendDebugDump("DEBUG");
-    return;
-  }
   
   if (cmd == "WIFI_CONFIG") {
     // Inicia portal de configuraÃ§Ã£o WiFi
@@ -4683,9 +3081,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
   if (!cadeiraHabilitada && cmd != "STATUS" && cmd != "AT_SEG") {
     enviarBLE("ERRO:BLOQUEADA");
     Serial.println("Cadeira bloqueada - comando ignorado");
-    if (origin && String(origin) == "MQTT") {
-      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "BLOCKED", false);
-    }
     return;
   }
 
@@ -4712,10 +3107,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("SE:LIMIT");
-      Serial.println("[BLOCK] SE bloqueado (limite)");
-      if (origin && String(origin) == "MQTT") {
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SE:LIMIT", false);
-      }
     }
   }
   else if (cmd == "DE") {
@@ -4733,10 +3124,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("DE:LIMIT");
-      Serial.println("[BLOCK] DE bloqueado (limite)");
-      if (origin && String(origin) == "MQTT") {
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DE:LIMIT", false);
-      }
     }
   }
   else if (cmd == "SA") {
@@ -4754,10 +3141,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("SA:LIMIT");
-      Serial.println("[BLOCK] SA bloqueado (limite)");
-      if (origin && String(origin) == "MQTT") {
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SA:LIMIT", false);
-      }
     }
   }
   else if (cmd == "DA") {
@@ -4775,10 +3158,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("DA:LIMIT");
-      Serial.println("[BLOCK] DA bloqueado (limite)");
-      if (origin && String(origin) == "MQTT") {
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DA:LIMIT", false);
-      }
     }
   }
   else if (cmd == "SP") {
@@ -4788,9 +3167,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("GAVETA:OPEN");
       enviarBLE("SP:GAVETA");
       mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_OPEN", false);
-      if (origin && String(origin) == "MQTT") {
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SP:GAVETA", false);
-      }
       mqttStatusDirty = true;
       return;
     }
@@ -4807,10 +3183,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("SP:LIMIT");
-      Serial.println("[BLOCK] SP bloqueado (limite)");
-      if (origin && String(origin) == "MQTT") {
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "SP:LIMIT", false);
-      }
     }
   }
   else if (cmd == "DP") {
@@ -4820,9 +3192,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("GAVETA:OPEN");
       enviarBLE("DP:GAVETA");
       mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_OPEN", false);
-      if (origin && String(origin) == "MQTT") {
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DP:GAVETA", false);
-      }
       mqttStatusDirty = true;
       return;
     }
@@ -4839,10 +3208,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       }
     } else {
       enviarBLE("DP:LIMIT");
-      Serial.println("[BLOCK] DP bloqueado (limite)");
-      if (origin && String(origin) == "MQTT") {
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "DP:LIMIT", false);
-      }
     }
   }
   else if (cmd == "TS") {
@@ -4866,6 +3231,15 @@ void executaComandoBluetooth(String cmd, const char* origin) {
   else if (cmd == "TD") {
     if (Rele_TREND_DESCE < 0) {
       enviarBLE("TD:NA");
+      return;
+    }
+    bool limitDown = false;
+    if (TREN_INT_DESCE >= 0 && digitalRead(TREN_INT_DESCE) == LOW) limitDown = true;
+    if (INT_TREND_DESCE >= 0 && digitalRead(INT_TREND_DESCE) == LOW) limitDown = true;
+    if (limitDown) {
+      enviarBLE("TD:LIMIT");
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TD_LIMIT", false);
+      mqttStatusDirty = true;
       return;
     }
     ultimoComandoTrendDesce = millis();
@@ -4945,34 +3319,27 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     double enc_m = (static_cast<double>(motorTravelPulsesEncosto) * mmPerPulseEncosto) / 1000.0;
     double ass_m = (static_cast<double>(motorTravelPulsesAssento) * mmPerPulseAssento) / 1000.0;
     double per_m = (static_cast<double>(motorTravelPulsesPerneira) * mmPerPulsePerneira) / 1000.0;
-    double tre_m = (static_cast<double>(motorTravelPulsesTrend) * mmPerPulseTrend) / 1000.0;
     Serial.print("[TRAVEL] PULSOS ENC=");
     Serial.print(static_cast<uint32_t>(motorTravelPulsesEncosto));
     Serial.print(" ASS=");
     Serial.print(static_cast<uint32_t>(motorTravelPulsesAssento));
     Serial.print(" PER=");
     Serial.println(static_cast<uint32_t>(motorTravelPulsesPerneira));
-    Serial.print("[TRAVEL] PULSOS TREND=");
-    Serial.println(static_cast<uint32_t>(motorTravelPulsesTrend));
     Serial.print("[TRAVEL] METROS ENC=");
     Serial.print(enc_m, 3);
     Serial.print(" ASS=");
     Serial.print(ass_m, 3);
     Serial.print(" PER=");
-    Serial.print(per_m, 3);
-    Serial.print(" TRE=");
-    Serial.println(tre_m, 3);
+    Serial.println(per_m, 3);
     enviarBLE("TRAVEL:OK");
   }
   else if (cmd == "TRAVEL_RESET") {
     motorTravelPulsesEncosto = 0;
     motorTravelPulsesAssento = 0;
     motorTravelPulsesPerneira = 0;
-    motorTravelPulsesTrend = 0;
     motorTravelUnsavedEncosto = 0;
     motorTravelUnsavedAssento = 0;
     motorTravelUnsavedPerneira = 0;
-    motorTravelUnsavedTrend = 0;
     saveMotorTravelPreferences(true);
     supabaseLogUsage("TRAVEL_RESET");
     enviarBLE("TRAVEL:RESET");
@@ -5007,13 +3374,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     saveMotorTravelPreferences(true);
     enviarBLE("MM_PER_PULSE_PER:OK");
   }
-  else if (cmd.startsWith("MM_PER_PULSE_TREND=") || cmd.startsWith("MM_PER_PULSE_TREND:")) {
-    int sep = cmd.indexOf('=');
-    if (sep < 0) sep = cmd.indexOf(':');
-    mmPerPulseTrend = cmd.substring(sep + 1).toFloat();
-    saveMotorTravelPreferences(true);
-    enviarBLE("MM_PER_PULSE_TREND:OK");
-  }
   else if (cmd == "ENC_DEBUG_ON") {
     encoderPulseDebug = true;
     enviarBLE("ENC_DEBUG:ON");
@@ -5022,52 +3382,6 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     encoderPulseDebug = false;
     enviarBLE("ENC_DEBUG:OFF");
   }
-  else if (cmd == "TREND_PULSE_ON") {
-    pulsePrintEnabled = true;
-    pulsePrintLastTrend = static_cast<uint32_t>(pulses_trend);
-    pulsePrintLastEncosto = static_cast<uint32_t>(pulses_encosto);
-    pulsePrintLastAssento = static_cast<uint32_t>(pulses_assento);
-    pulsePrintLastPerneira = static_cast<uint32_t>(pulses_perneira);
-    Serial.println("[PULSE] ON");
-    enviarBLE("TREND_PULSE:ON");
-  }
-  else if (cmd == "TREND_PULSE_OFF") {
-    pulsePrintEnabled = false;
-    Serial.println("[PULSE] OFF");
-    enviarBLE("TREND_PULSE:OFF");
-  }
-  else if (cmd == "TREND_PULSE_STATUS") {
-    Serial.print("[PULSE] ");
-    Serial.println(pulsePrintEnabled ? "ON" : "OFF");
-    enviarBLE(pulsePrintEnabled ? "TREND_PULSE:ON" : "TREND_PULSE:OFF");
-  }
-  else if (cmd == "PULSE_ON") {
-    pulsePrintEnabled = true;
-    pulsePrintLastTrend = static_cast<uint32_t>(pulses_trend);
-    pulsePrintLastEncosto = static_cast<uint32_t>(pulses_encosto);
-    pulsePrintLastAssento = static_cast<uint32_t>(pulses_assento);
-    pulsePrintLastPerneira = static_cast<uint32_t>(pulses_perneira);
-    Serial.println("[PULSE] ON");
-    enviarBLE("PULSE:ON");
-  }
-  else if (cmd == "PULSE_OFF") {
-    pulsePrintEnabled = false;
-    Serial.println("[PULSE] OFF");
-    enviarBLE("PULSE:OFF");
-  }
-  else if (cmd == "PULSE_STATUS") {
-    Serial.print("[PULSE] ");
-    Serial.print(pulsePrintEnabled ? "ON" : "OFF");
-    Serial.print(" | M1(TREND)=");
-    Serial.print(static_cast<uint32_t>(pulses_trend));
-    Serial.print(" M2(ENC)=");
-    Serial.print(static_cast<uint32_t>(pulses_encosto));
-    Serial.print(" M3(ASS)=");
-    Serial.print(static_cast<uint32_t>(pulses_assento));
-    Serial.print(" M4(PER)=");
-    Serial.println(static_cast<uint32_t>(pulses_perneira));
-    enviarBLE(pulsePrintEnabled ? "PULSE:ON" : "PULSE:OFF");
-  }
   else {
     enviarBLE("ERRO:CMD_INVALIDO");
   }
@@ -5075,42 +3389,33 @@ void executaComandoBluetooth(String cmd, const char* origin) {
 
 // Envia status completo via BLE em formato JSON
 void enviaStatusBluetooth() {
-  StaticJsonDocument<896> doc;
+  StaticJsonDocument<640> doc;
   
   doc["serial"] = NUMERO_SERIE_CADEIRA;
-  doc["enabled"] = cadeiraHabilitada;
-  doc["maintenanceRequired"] = manutencaoNecessaria;
-  doc["hourMeter"] = horimetro;
-  doc["wifiConnected"] = (WiFi.status() == WL_CONNECTED);
+  doc["habilitada"] = cadeiraHabilitada;
+  doc["manutencao"] = manutencaoNecessaria;
+  doc["horimetro"] = horimetro;
+  doc["wifi"] = WiFi.isConnected();
+  doc["wifi_ssid"] = WiFi.isConnected() ? WiFi.SSID() : "";
   
-  // Estados dos relés
-  doc["reflectorOn"] = estado_r;
-  doc["backUpOn"] = estado_se;
-  doc["backDownOn"] = estado_de;
-  doc["seatUpOn"] = estado_sa;
-  doc["seatDownOn"] = estado_da;
-  doc["upperLegsOn"] = estado_sp;
-  doc["lowerLegsOn"] = estado_dp;
-  doc["trendUpOn"] = estado_trend_sobe;
-  doc["trendDownOn"] = estado_trend_desce;
-  
-  doc["backPosition"] = incoder_virtual_encosto_service;
-  doc["seatPosition"] = incoder_virtual_asento_service;
-  doc["legPosition"] = incoder_virtual_perneira_service;
-  doc["gavetaOpen"] = isGavetaAbertaRaw();
-  
-  if (TREN_INT_DESCE >= 0) doc["trenIntDown"] = (digitalRead(TREN_INT_DESCE) == HIGH);
-  if (INT_TREND_DESCE >= 0) doc["trendIntDown"] = (digitalRead(INT_TREND_DESCE) == HIGH);
-  if (TREN_INT_SOBE >= 0) doc["trenIntUp"] = (digitalRead(TREN_INT_SOBE) == HIGH);
-  if (INT_TREND_SOBE >= 0) doc["trendIntUp"] = (digitalRead(INT_TREND_SOBE) == HIGH);
+  // Estados dos relÃ©s
+  doc["refletor"] = estado_r;
+  doc["encosto_pos"] = incoder_virtual_encosto_service;
+  doc["assento_pos"] = incoder_virtual_asento_service;
+  doc["perneira_pos"] = incoder_virtual_perneira_service;
+  doc["gaveta_open"] = isGavetaAbertaRaw();
+  doc["trend_sobe_on"] = estado_trend_sobe;
+  doc["trend_desce_on"] = estado_trend_desce;
+  if (TREN_INT_DESCE >= 0) doc["tren_int_desce"] = (digitalRead(TREN_INT_DESCE) == LOW);
+  if (INT_TREND_DESCE >= 0) doc["int_trend_desce"] = (digitalRead(INT_TREND_DESCE) == LOW);
   
   // Limites
-  doc["seLimit"] = trava_bt_SE;
-  doc["deLimit"] = trava_bt_DE;
-  doc["saLimit"] = trava_bt_SA;
-  doc["daLimit"] = trava_bt_DA;
-  doc["spLimit"] = trava_bt_SP;
-  doc["dpLimit"] = trava_bt_DP;
+  doc["se_limit"] = trava_bt_SE;
+  doc["de_limit"] = trava_bt_DE;
+  doc["sa_limit"] = trava_bt_SA;
+  doc["da_limit"] = trava_bt_DA;
+  doc["sp_limit"] = trava_bt_SP;
+  doc["dp_limit"] = trava_bt_DP;
 
   String output;
   serializeJson(doc, output);
@@ -5140,7 +3445,7 @@ void atualizaHorimetro() {
   // Verifica se algum motor está ligado (HIGH = ligado)
   bool algumMotorLigado = (digitalRead(Rele_SA) == HIGH) || (digitalRead(Rele_DA) == HIGH) ||
                           (digitalRead(Rele_SE) == HIGH) || (digitalRead(Rele_DE) == HIGH) ||
-                          (digitalRead(Rele_SP) == HIGH) || relayIsOn(Rele_DP) ||
+                          (digitalRead(Rele_SP) == HIGH) || (digitalRead(Rele_DP) == HIGH) ||
                           (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) ||
                           (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH);
   
@@ -5159,7 +3464,7 @@ void salvaHorimetro() {
 }
 
 void carregaHorimetro() {
-  preferences.begin("horimetro", false);
+  preferences.begin("horimetro", true);
   horimetro = preferences.getFloat("hours", 0);
   totalMillisMotor = preferences.getULong("millis", 0);
   preferences.end();
@@ -5361,6 +3666,116 @@ static bool supabasePostJson(const String& restPath, const String& payload) {
   return ok;
 }
 
+static bool supabasePatchJson(const String& restPath, const String& payload) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (ESP.getFreeHeap() < 30000) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  String url = supabaseUrl + restPath;
+  if (!http.begin(client, url)) {
+    return false;
+  }
+
+  http.setTimeout(10000);
+  http.addHeader("Content-Type", "application/json");
+  if (supabaseKey.length() > 0) {
+    http.addHeader("apikey", supabaseKey);
+    http.addHeader("Authorization", String("Bearer ") + supabaseKey);
+  }
+  http.addHeader("Prefer", "return=minimal");
+
+  int httpCode = http.PATCH(payload);
+  bool ok = (httpCode == 200 || httpCode == 204);
+  if (!ok && httpCode > 0) {
+    Serial.print("[ERRO] Supabase PATCH ");
+    Serial.print(restPath);
+    Serial.print(" ");
+    Serial.print(httpCode);
+    Serial.print(" ");
+    Serial.println(http.getString());
+  }
+  http.end();
+  return ok;
+}
+
+static inline void jsonPutTimestampOrNull(JsonDocument& doc, const char* key) {
+  String ts = getTimestamp();
+  if (ts == "null") {
+    doc[key] = nullptr;
+  } else {
+    doc[key] = ts;
+  }
+}
+
+static void supabaseOtaPatchLastUpdateCheck() {
+  StaticJsonDocument<128> doc;
+  jsonPutTimestampOrNull(doc, "last_update_check");
+  String payload;
+  serializeJson(doc, payload);
+  supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload);
+}
+
+static void supabaseOtaPatchLastUpdateAttempt() {
+  StaticJsonDocument<128> doc;
+  jsonPutTimestampOrNull(doc, "last_update_attempt");
+  String payload;
+  serializeJson(doc, payload);
+  supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload);
+}
+
+static void supabaseOtaPatchCurrentFirmware(const String& version) {
+  StaticJsonDocument<192> doc;
+  doc["current_firmware"] = version;
+  jsonPutTimestampOrNull(doc, "last_update");
+  jsonPutTimestampOrNull(doc, "last_update_check");
+  jsonPutTimestampOrNull(doc, "last_update_attempt");
+  String payload;
+  serializeJson(doc, payload);
+  if (supabasePatchJson("/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA, payload)) {
+    supabaseChairFirmware = version;
+  }
+}
+
+static void supabaseOtaInsertDeviceUpdate(
+  const String& fromVersion,
+  const String& toVersion,
+  const char* status,
+  const String& errorMessage,
+  bool includeCompletedAt,
+  int durationSeconds,
+  int bytesDownloaded
+) {
+  if (supabaseChairId.length() == 0) {
+    return;
+  }
+
+  StaticJsonDocument<384> doc;
+  doc["device_id"] = supabaseChairId;
+  doc["from_version"] = fromVersion;
+  doc["to_version"] = toVersion;
+  doc["status"] = status;
+  if (errorMessage.length() > 0) {
+    doc["error_message"] = errorMessage;
+  }
+  jsonPutTimestampOrNull(doc, "started_at");
+  if (includeCompletedAt) {
+    jsonPutTimestampOrNull(doc, "completed_at");
+  }
+  if (durationSeconds > 0) {
+    doc["duration_seconds"] = durationSeconds;
+  }
+  if (bytesDownloaded > 0) {
+    doc["bytes_downloaded"] = bytesDownloaded;
+  }
+
+  String payload;
+  serializeJson(doc, payload);
+  supabasePostJson("/rest/v1/device_updates", payload);
+}
+
 static bool supabaseGetJson(const String& restPath, String& responseOut) {
   if (WiFi.status() != WL_CONNECTED) return false;
   if (ESP.getFreeHeap() < 30000) return false;
@@ -5401,82 +3816,57 @@ static bool supabaseGetJson(const String& restPath, String& responseOut) {
 
 static void loadMotorTravelPreferences() {
   Preferences p;
-  if (!p.begin("motor_travel", false)) {
+  if (!p.begin("motor_travel", true)) {
     return;
   }
-  motorTravelPulsesEncosto = p.isKey("p_enc") ? p.getULong64("p_enc", 0) : 0;
-  motorTravelPulsesAssento = p.isKey("p_ass") ? p.getULong64("p_ass", 0) : 0;
-  motorTravelPulsesPerneira = p.isKey("p_per") ? p.getULong64("p_per", 0) : 0;
-  motorTravelPulsesTrend = p.isKey("p_trend") ? p.getULong64("p_trend", 0) : 0;
-  
-  // Recupera posições virtuais (para manter após queda de energia)
-  incoder_virtual_encosto_service = p.getInt("v_enc", 0);
-  incoder_virtual_asento_service = p.getInt("v_ass", 0);
-  incoder_virtual_perneira_service = p.getInt("v_per", 0);
-
-  mmPerPulseEncosto = p.isKey("mm_enc") ? p.getFloat("mm_enc", mmPerPulseEncosto) : mmPerPulseEncosto;
-  mmPerPulseAssento = p.isKey("mm_ass") ? p.getFloat("mm_ass", mmPerPulseAssento) : mmPerPulseAssento;
-  mmPerPulsePerneira = p.isKey("mm_per") ? p.getFloat("mm_per", mmPerPulsePerneira) : mmPerPulsePerneira;
-  mmPerPulseTrend = p.isKey("mm_trend") ? p.getFloat("mm_trend", mmPerPulseTrend) : mmPerPulseTrend;
+  motorTravelPulsesEncosto = p.getULong64("p_enc", 0);
+  motorTravelPulsesAssento = p.getULong64("p_ass", 0);
+  motorTravelPulsesPerneira = p.getULong64("p_per", 0);
+  mmPerPulseEncosto = p.getFloat("mm_enc", mmPerPulseEncosto);
+  mmPerPulseAssento = p.getFloat("mm_ass", mmPerPulseAssento);
+  mmPerPulsePerneira = p.getFloat("mm_per", mmPerPulsePerneira);
   p.end();
   Serial.print("[TRAVEL] PULSOS ENC=");
   Serial.print(static_cast<uint32_t>(motorTravelPulsesEncosto));
   Serial.print(" ASS=");
   Serial.print(static_cast<uint32_t>(motorTravelPulsesAssento));
   Serial.print(" PER=");
-  Serial.print(static_cast<uint32_t>(motorTravelPulsesPerneira));
-  Serial.print(" TREND=");
-  Serial.println(static_cast<uint32_t>(motorTravelPulsesTrend));
-  Serial.print("[TRAVEL] POS_VIRTUAL ENC=");
-  Serial.print(incoder_virtual_encosto_service);
+  Serial.println(static_cast<uint32_t>(motorTravelPulsesPerneira));
+  Serial.print("[TRAVEL] MM_PER_PULSE ENC=");
+  Serial.print(mmPerPulseEncosto, 6);
   Serial.print(" ASS=");
-  Serial.print(incoder_virtual_asento_service);
+  Serial.print(mmPerPulseAssento, 6);
   Serial.print(" PER=");
-  Serial.println(incoder_virtual_perneira_service);
+  Serial.println(mmPerPulsePerneira, 6);
 }
 
 static void saveMotorTravelPreferences(bool force) {
   uint32_t now = millis();
-  static int last_v_enc = -1, last_v_ass = -1, last_v_per = -1;
-  
-  bool posChanged = (incoder_virtual_encosto_service != last_v_enc || 
-                     incoder_virtual_asento_service != last_v_ass || 
-                     incoder_virtual_perneira_service != last_v_per);
-
   if (!force) {
-    return; // Não salva automaticamente por tempo, apenas quando forçado (ex: queda de energia)
+    if (motorTravelUnsavedEncosto == 0 && motorTravelUnsavedAssento == 0 && motorTravelUnsavedPerneira == 0) {
+      return;
+    }
+    if (static_cast<int32_t>(now - motorTravelNextSaveMs) < 0) {
+      return;
+    }
   }
 
   Preferences p;
   if (!p.begin("motor_travel", false)) {
-    motorTravelNextSaveMs = now + 60000; // Tenta de novo em 1 minuto se falhar
+    motorTravelNextSaveMs = now + MOTOR_TRAVEL_SAVE_INTERVAL_MS;
     return;
   }
   p.putULong64("p_enc", motorTravelPulsesEncosto);
   p.putULong64("p_ass", motorTravelPulsesAssento);
   p.putULong64("p_per", motorTravelPulsesPerneira);
-  p.putULong64("p_trend", motorTravelPulsesTrend);
-  
-  // Salva posições virtuais
-  p.putInt("v_enc", incoder_virtual_encosto_service);
-  p.putInt("v_ass", incoder_virtual_asento_service);
-  p.putInt("v_per", incoder_virtual_perneira_service);
-  
   p.putFloat("mm_enc", mmPerPulseEncosto);
   p.putFloat("mm_ass", mmPerPulseAssento);
   p.putFloat("mm_per", mmPerPulsePerneira);
-  p.putFloat("mm_trend", mmPerPulseTrend);
   p.end();
-
-  last_v_enc = incoder_virtual_encosto_service;
-  last_v_ass = incoder_virtual_asento_service;
-  last_v_per = incoder_virtual_perneira_service;
-
   motorTravelUnsavedEncosto = 0;
   motorTravelUnsavedAssento = 0;
   motorTravelUnsavedPerneira = 0;
-  motorTravelUnsavedTrend = 0;
-  motorTravelNextSaveMs = now + (15 * 60 * 1000); // 15 minutos
+  motorTravelNextSaveMs = now + MOTOR_TRAVEL_SAVE_INTERVAL_MS;
 }
 
 static bool supabaseUpsertMotorTravel() {
@@ -5486,22 +3876,18 @@ static bool supabaseUpsertMotorTravel() {
   double enc_m = (static_cast<double>(motorTravelPulsesEncosto) * mmPerPulseEncosto) / 1000.0;
   double ass_m = (static_cast<double>(motorTravelPulsesAssento) * mmPerPulseAssento) / 1000.0;
   double per_m = (static_cast<double>(motorTravelPulsesPerneira) * mmPerPulsePerneira) / 1000.0;
-  double tre_m = (static_cast<double>(motorTravelPulsesTrend) * mmPerPulseTrend) / 1000.0;
 
-  StaticJsonDocument<640> doc;
+  StaticJsonDocument<512> doc;
   doc["chair_serial"] = NUMERO_SERIE_CADEIRA;
   doc["encosto_pulses"] = static_cast<double>(motorTravelPulsesEncosto);
   doc["assento_pulses"] = static_cast<double>(motorTravelPulsesAssento);
   doc["perneira_pulses"] = static_cast<double>(motorTravelPulsesPerneira);
-  doc["trend_pulses"] = static_cast<double>(motorTravelPulsesTrend);
   doc["encosto_m"] = enc_m;
   doc["assento_m"] = ass_m;
   doc["perneira_m"] = per_m;
-  doc["trend_m"] = tre_m;
   doc["mm_per_pulse_encosto"] = mmPerPulseEncosto;
   doc["mm_per_pulse_assento"] = mmPerPulseAssento;
   doc["mm_per_pulse_perneira"] = mmPerPulsePerneira;
-  doc["mm_per_pulse_trend"] = mmPerPulseTrend;
   doc["updated_at"] = getTimestamp();
 
   String payload;
@@ -5522,7 +3908,7 @@ static bool supabaseUpsertMotorTravel() {
   }
   http.addHeader("Prefer", "resolution=merge-duplicates,return=minimal");
   int httpCode = http.POST(payload);
-  bool ok = (httpCode == 200 || httpCode == 201 || httpCode == 204);
+  bool ok = (httpCode == 201 || httpCode == 204);
   if (!ok && httpCode > 0) {
     Serial.print("[ERRO] MotorTravel ");
     Serial.print(httpCode);
@@ -5538,17 +3924,10 @@ static void sendMotorTravelToSupabaseIfNeeded() {
   if (static_cast<int32_t>(now - motorTravelNextSendMs) < 0) {
     return;
   }
-  bool hasPending = (motorTravelUnsavedEncosto != 0 || motorTravelUnsavedAssento != 0 || motorTravelUnsavedPerneira != 0 || motorTravelUnsavedTrend != 0);
   motorTravelNextSendMs = now + MOTOR_TRAVEL_SEND_INTERVAL_MS;
-  if (!hasPending) {
-    return;
-  }
   saveMotorTravelPreferences(true);
   if (supabaseUpsertMotorTravel()) {
     supabaseLogUsage("MOTOR_TRAVEL_SENT");
-    bip();
-  } else {
-    bipLong();
   }
 }
 
@@ -5601,7 +3980,7 @@ static bool supabaseLoadMemoryPositionFromDb(int slot) {
   preferences.putInt("encoder_asento", incoder_virtual_asento_M1);
   preferences.end();
 
-  preferences.begin("encoder_pern", false);
+  preferences.begin("encoder_perneira", false);
   preferences.putInt("encoder_perneira", incoder_virtual_perneira_M1);
   preferences.end();
 
@@ -5710,7 +4089,7 @@ void verificaStatusCadeira() {
   client.setInsecure();
   
   HTTPClient http;
-  String url = supabaseUrl + "/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA + "&select=enabled,maintenance_required,maintenance_hours";
+  String url = supabaseUrl + "/rest/v1/chairs?serial_number=eq." + NUMERO_SERIE_CADEIRA + "&select=id,enabled,current_firmware,maintenance_required,maintenance_hours";
   
   if (http.begin(client, url)) {
     http.setTimeout(10000); // 10s timeout
@@ -5723,13 +4102,6 @@ void verificaStatusCadeira() {
     Serial.print("HTTP Code: "); Serial.println(httpCode);
     
     if (httpCode == 200) {
-      if (!beepSupabaseOkDone) {
-        bip(); delay(120);
-        bip();
-        beepSupabaseOkDone = true;
-      }
-      supabaseOkAtMs = millis();
-      supabaseFailAtMs = 0;
       String response = http.getString();
       Serial.print("Resposta: "); Serial.println(response);
       
@@ -5743,7 +4115,13 @@ void verificaStatusCadeira() {
         
         if (!error) {
           if (doc.is<JsonArray>() && doc.size() > 0) {
+            if (doc[0]["id"].is<const char*>()) {
+              supabaseChairId = String(doc[0]["id"].as<const char*>());
+            }
             cadeiraHabilitada = doc[0]["enabled"] | true;
+            if (doc[0]["current_firmware"].is<const char*>()) {
+              supabaseChairFirmware = String(doc[0]["current_firmware"].as<const char*>());
+            }
             manutencaoNecessaria = doc[0]["maintenance_required"] | false;
             float horasManutencao = doc[0]["maintenance_hours"] | 500;
             
@@ -5779,12 +4157,10 @@ void verificaStatusCadeira() {
       }
     } else {
       Serial.print("Erro HTTP: "); Serial.println(httpCode);
-      if (supabaseFailAtMs == 0) supabaseFailAtMs = millis();
     }
     http.end();
   } else {
     Serial.println("Falha ao iniciar conexao HTTP");
-    if (supabaseFailAtMs == 0) supabaseFailAtMs = millis();
   }
 }
 
@@ -5835,29 +4211,26 @@ void bipBloqueio() {
 
 // ========== CARREGAMENTO DE PREFERÃŠNCIAS ==========
 void carregaPreferencias() {
-  preferences.begin("cadeira", false);
-  supabaseUserId = preferences.isKey("user_id") ? preferences.getString("user_id", "") : "";
-  supabaseMaintenanceRequestSent = preferences.isKey("mnt_sent") ? preferences.getBool("mnt_sent", false) : false;
+  preferences.begin("cadeira", true);
+  supabaseUserId = preferences.getString("user_id", "");
+  supabaseMaintenanceRequestSent = preferences.getBool("mnt_sent", false);
   preferences.end();
 
-  preferences.begin("supabase", false);
-  supabaseUrl = preferences.isKey("url") ? preferences.getString("url", SUPABASE_URL) : String(SUPABASE_URL);
-  supabaseKey = preferences.isKey("key") ? preferences.getString("key", SUPABASE_KEY) : String(SUPABASE_KEY);
-  if (supabaseKey.length() == 0) {
-    supabaseKey = SUPABASE_KEY;
-  }
+  preferences.begin("supabase", true);
+  supabaseUrl = preferences.getString("url", SUPABASE_URL);
+  supabaseKey = preferences.getString("key", "");
   preferences.end();
 
   // Carrega posiÃ§Ãµes do encoder virtual M1
-  preferences.begin("encoder_encosto", false);
+  preferences.begin("encoder_encosto", true);
   incoder_virtual_encosto_M1 = preferences.getInt("encoder_encosto", 0);
   preferences.end();
   
-  preferences.begin("encoder_asento", false);
+  preferences.begin("encoder_asento", true);
   incoder_virtual_asento_M1 = preferences.getInt("encoder_asento", 0);
   preferences.end();
   
-  preferences.begin("encoder_pern", false);
+  preferences.begin("encoder_perneira", true);
   incoder_virtual_perneira_M1 = preferences.getInt("encoder_perneira", 0);
   preferences.end();
 
@@ -5990,49 +4363,14 @@ void contagem_tempo_incoder_virtual() {
   bool dir_asento_up = (digitalRead(Rele_SA) == HIGH);
   bool dir_asento_down = (digitalRead(Rele_DA) == HIGH);
   bool dir_perneira_up = (digitalRead(Rele_SP) == HIGH);
-  bool dir_perneira_down = relayIsOn(Rele_DP);
+  bool dir_perneira_down = (digitalRead(Rele_DP) == HIGH);
 
   uint32_t d_encosto = pulses_encosto - last_pulses_encosto;
   uint32_t d_asento = pulses_assento - last_pulses_assento;
   uint32_t d_perneira = pulses_perneira - last_pulses_perneira;
-  uint32_t d_trend = pulses_trend - last_pulses_trend_travel;
   last_pulses_encosto = pulses_encosto;
   last_pulses_assento = pulses_assento;
   last_pulses_perneira = pulses_perneira;
-  last_pulses_trend_travel = pulses_trend;
-
-  if (pulsePrintEnabled) {
-    uint32_t curTrend = static_cast<uint32_t>(pulses_trend);
-    uint32_t curEnc = static_cast<uint32_t>(pulses_encosto);
-    uint32_t curAss = static_cast<uint32_t>(pulses_assento);
-    uint32_t curPer = static_cast<uint32_t>(pulses_perneira);
-
-    if (curTrend < pulsePrintLastTrend) pulsePrintLastTrend = curTrend;
-    if (curEnc < pulsePrintLastEncosto) pulsePrintLastEncosto = curEnc;
-    if (curAss < pulsePrintLastAssento) pulsePrintLastAssento = curAss;
-    if (curPer < pulsePrintLastPerneira) pulsePrintLastPerneira = curPer;
-
-    while (pulsePrintLastTrend < curTrend) {
-      pulsePrintLastTrend++;
-      Serial.print("PULSO NO TREND MOTOR 1 = ");
-      Serial.println(pulsePrintLastTrend);
-    }
-    while (pulsePrintLastEncosto < curEnc) {
-      pulsePrintLastEncosto++;
-      Serial.print("PULSO NO TREND MOTOR 2 = ");
-      Serial.println(pulsePrintLastEncosto);
-    }
-    while (pulsePrintLastAssento < curAss) {
-      pulsePrintLastAssento++;
-      Serial.print("PULSO NO TREND MOTOR 3 = ");
-      Serial.println(pulsePrintLastAssento);
-    }
-    while (pulsePrintLastPerneira < curPer) {
-      pulsePrintLastPerneira++;
-      Serial.print("PULSO NO TREND MOTOR 4 = ");
-      Serial.println(pulsePrintLastPerneira);
-    }
-  }
 
   if (d_encosto) {
     motorTravelPulsesEncosto += d_encosto;
@@ -6046,27 +4384,19 @@ void contagem_tempo_incoder_virtual() {
     motorTravelPulsesPerneira += d_perneira;
     motorTravelUnsavedPerneira += d_perneira;
   }
-  if (d_trend) {
-    motorTravelPulsesTrend += d_trend;
-    motorTravelUnsavedTrend += d_trend;
-  }
-  if (encoderPulseDebug && (d_encosto || d_asento || d_perneira || d_trend)) {
+  if (encoderPulseDebug && (d_encosto || d_asento || d_perneira)) {
     Serial.print("[ENC_PULSE] dENC=");
     Serial.print(d_encosto);
     Serial.print(" dASS=");
     Serial.print(d_asento);
     Serial.print(" dPER=");
     Serial.print(d_perneira);
-    Serial.print(" dTRE=");
-    Serial.print(d_trend);
     Serial.print(" | PENC=");
     Serial.print(static_cast<uint32_t>(pulses_encosto));
     Serial.print(" PASS=");
     Serial.print(static_cast<uint32_t>(pulses_assento));
     Serial.print(" PPER=");
-    Serial.print(static_cast<uint32_t>(pulses_perneira));
-    Serial.print(" PTRE=");
-    Serial.println(static_cast<uint32_t>(pulses_trend));
+    Serial.println(static_cast<uint32_t>(pulses_perneira));
   }
   saveMotorTravelPreferences(false);
 
@@ -6153,8 +4483,8 @@ const unsigned long TIMEOUT_RELE = 30000; // 30 segundos
 // ========== MONITORAMENTO DE TEMPO DOS RELÃ‰S (seguranÃ§a) ==========
 void monitora_tempo_rele() {
   if (isGavetaAberta()) {
-    bool spOn = relayIsOn(Rele_SP);
-    bool dpOn = relayIsOn(Rele_DP);
+    bool spOn = (digitalRead(Rele_SP) == HIGH);
+    bool dpOn = (digitalRead(Rele_DP) == HIGH);
     if (spOn || dpOn) {
       Serial.println("[GAVETA] Aberta - desligando perneira");
       setOutputPin(Rele_SP, false, "GAVETA");
@@ -6168,21 +4498,19 @@ void monitora_tempo_rele() {
     }
   }
 
-  bool seOn = relayIsOn(Rele_SE);
-  bool saOn = relayIsOn(Rele_SA);
-  bool daOn = relayIsOn(Rele_DA);
-  bool spOn = relayIsOn(Rele_SP);
-  bool dpOn = relayIsOn(Rele_DP);
-  bool deOn = relayIsOn(Rele_DE);
-  bool trendSobeOn = (Rele_TREND_SOBE >= 0 && relayIsOn(Rele_TREND_SOBE));
-  bool trendDesceOn = (Rele_TREND_DESCE >= 0 && relayIsOn(Rele_TREND_DESCE));
-  bool algumReleAtivo = (seOn || saOn || daOn || spOn || dpOn || deOn || trendSobeOn || trendDesceOn);
+  bool algumReleAtivo = (digitalRead(Rele_SE) == HIGH || 
+                         digitalRead(Rele_SA) == HIGH || 
+                         digitalRead(Rele_DA) == HIGH || 
+                         digitalRead(Rele_SP) == HIGH || 
+                         digitalRead(Rele_DP) == HIGH || 
+                         digitalRead(Rele_DE) == HIGH ||
+                         (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) ||
+                         (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH));
 
   if (algumReleAtivo) {
     if (inicioAtivacaoRele == 0) {
       inicioAtivacaoRele = millis();
     } else if (millis() - inicioAtivacaoRele >= TIMEOUT_RELE) {
-      relayTrackPrintOnRelays("TIMEOUT");
       Serial.println("!!! TIMEOUT DE SEGURANÃ‡A - RELÃ‰ ATIVO POR 30s !!!");
       AT_SEG();
       inicioAtivacaoRele = 0;
@@ -6506,10 +4834,7 @@ void executaCalibracao() {
   incoder_virtual_asento_service = 0;
   incoder_virtual_perneira_service = 0;
   pulses_encosto = pulses_assento = pulses_perneira = 0;
-  pulses_trend = 0;
   last_pulses_encosto = last_pulses_assento = last_pulses_perneira = 0;
-  last_pulses_trend = 0;
-  last_pulses_trend_travel = 0;
   contador2 = 0;
   cont = 1;
   executa_vz();
@@ -6519,43 +4844,21 @@ void executaCalibracao() {
   setOutputPin(Rele_SA, false, "CAL");
   setOutputPin(Rele_DP, false, "CAL");
   setOutputPin(Rele_SP, false, "CAL");
-  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
-  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "CAL");
   delay(200);
   Serial.println("Subindo todos os eixos ate limite (aprendizado)...");
   unsigned long start = millis();
-  bool doneEnc = false, doneAss = false, donePer = false, doneTrend = false;
-  bool errEnc = false, errAss = false, errPer = false, errTrend = false;
-  bool sawEnc = false, sawAss = false, sawPer = false, sawTrend = false;
-  unsigned long lastChangeEnc = millis(), lastChangeAss = millis(), lastChangePer = millis(), lastChangeTrend = millis();
-  unsigned long startEnc = 0, startAss = 0, startPer = 0, startTrend = 0;
+  bool doneEnc = false, doneAss = false, donePer = false;
+  bool errEnc = false, errAss = false, errPer = false;
+  bool sawEnc = false, sawAss = false, sawPer = false;
+  unsigned long lastChangeEnc = millis(), lastChangeAss = millis(), lastChangePer = millis();
+  unsigned long startEnc = millis(), startAss = millis(), startPer = millis();
   uint32_t startPulseEnc = pulses_encosto, startPulseAss = pulses_assento, startPulsePer = pulses_perneira;
-  uint32_t startPulseTrend = pulses_trend;
   uint32_t prevPulseEnc = startPulseEnc, prevPulseAss = startPulseAss, prevPulsePer = startPulsePer;
-  uint32_t prevPulseTrend = startPulseTrend;
-  startEnc = millis();
-  lastChangeEnc = startEnc;
   setOutputPin(Rele_DE, true, "CAL");
-  delay(1000);
-  startAss = millis();
-  lastChangeAss = startAss;
   setOutputPin(Rele_SA, true, "CAL");
-  delay(1000);
-  startPer = millis();
-  lastChangePer = startPer;
   setOutputPin(Rele_SP, true, "CAL");
-  delay(1000);
-  if (Rele_TREND_SOBE >= 0) {
-    startTrend = millis();
-    lastChangeTrend = startTrend;
-    setOutputPin(Rele_TREND_SOBE, true, "CAL");
-  } else {
-    doneTrend = true;
-  }
-
-  uint32_t maxTrend = 0;
-  while (!(doneEnc && doneAss && donePer && doneTrend) && (millis() - start) < 30000) {
-    uint32_t pe = pulses_encosto, pa = pulses_assento, pp = pulses_perneira, pt = pulses_trend;
+  while (!(doneEnc && doneAss && donePer) && (millis() - start) < 30000) {
+    uint32_t pe = pulses_encosto, pa = pulses_assento, pp = pulses_perneira;
     contagem_tempo_incoder_virtual();
     if (!doneEnc) {
       if (pe != prevPulseEnc) {
@@ -6611,34 +4914,13 @@ void executaCalibracao() {
         Serial.print("Perneira max = "); Serial.println(incoder_virtual_perneira_service);
       }
     }
-    if (!doneTrend) {
-      if (pt != prevPulseTrend) {
-        lastChangeTrend = millis();
-        sawTrend = true;
-        prevPulseTrend = pt;
-        maxTrend = pt;
-      }
-      if ((millis() - startTrend > 2000) && !sawTrend) {
-        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
-        doneTrend = true;
-        errTrend = true;
-        for (int i=0;i<3;i++){ bip(); delay(120);} delay(200); for (int i=0;i<3;i++){ bip(); delay(120);}
-        Serial.println("[ERRO CAL] Trend: sem pulsos do encoder. Verifique ligacao.");
-      } else if (sawTrend && millis() - lastChangeTrend > 500) {
-        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
-        doneTrend = true;
-        Serial.print("Trend max = "); Serial.println(maxTrend);
-      }
-    }
     delay(10);
   }
   setOutputPin(Rele_DE, false, "CAL");
   setOutputPin(Rele_SA, false, "CAL");
   setOutputPin(Rele_SP, false, "CAL");
-  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
-  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "CAL");
   calibrationInProgress = false;
-  if (errEnc || errAss || errPer || errTrend) {
+  if (errEnc || errAss || errPer) {
     Serial.println("[ERRO CAL] Calibracao incompleta. Pelo menos um encoder nao gerou pulsos.");
     for (int i=0;i<5;i++){ bip(); delay(120);}
   } else {
@@ -6647,7 +4929,6 @@ void executaCalibracao() {
     p.putInt("encosto_max", incoder_virtual_encosto_service);
     p.putInt("assento_max", incoder_virtual_asento_service);
     p.putInt("perneira_max", incoder_virtual_perneira_service);
-    p.putUInt("trend_max", maxTrend);
     p.putBool("cal_done", true);
     p.end();
     fim_encosto_encoder = incoder_virtual_encosto_service;
@@ -6667,7 +4948,6 @@ void executaCalibracao() {
 void executa_vz() {
   Serial.println("VZ acionado");
   bip();
-  buzzerPulseStart2s();
 
   bool checkEnc = (fim_encosto_encoder == 0 && fim_asento_encoder == 0 && fim_perneira_encoder == 0);
   int startEncPos = incoder_virtual_encosto_service;
@@ -6700,7 +4980,6 @@ void executa_vz() {
 
   while (cont == 1) {
     Watch_Dog();
-    buzzerTestTick();
     delay(1);
     
     // Verifica parada via BLE
@@ -6713,7 +4992,6 @@ void executa_vz() {
         AT_SEG();
         cont = 0;
         contador2 = 0;
-        buzzerPulseStop();
         return;
       }
     }
@@ -6752,7 +5030,6 @@ void executa_vz() {
   }
 
   bip();
-  buzzerPulseStop();
   faz_bt_seg = 0;
   Serial.println("Fim VZ");
   enviarBLE("VZ:DONE");
@@ -6769,7 +5046,6 @@ void executa_vz_ini() {
   Serial.println("====================================");
   Serial.println("Executando VZ inicial - Ativando reles sequencialmente");
   Serial.println("[INFO] Bloqueando loop() durante VZ inicial...");
-  buzzerPulseStart2s();
   vzInicialEmAndamento = true; // Bloqueia loop() completamente
   
   Serial.println("[INFO] Desabilitando controle de encoder virtual temporariamente...");
@@ -6809,7 +5085,6 @@ void executa_vz_ini() {
   while (millis() - startTime < VZ_MAX_TIME_MS) {
     yield();  // Alimenta watchdog continuamente
     Watch_Dog();
-    buzzerTestTick();
     if (checkEnc) {
       contagem_tempo_incoder_virtual();
     }
@@ -6864,14 +5139,12 @@ void executa_vz_ini() {
   
   Serial.println("[INFO] Desbloqueando loop() - VZ inicial completo.");
   vzInicialEmAndamento = false; // Libera loop() para executar normalmente
-  buzzerPulseStop();
 }
 
 // ========== EXECUÃ‡ÃƒO DA POSIÃ‡ÃƒO DE PARTO (PT) ==========
 void executa_pt() {
   Serial.println("PT acionado");
   bip();
-  buzzerPulseStart2s();
 
   setOutputPin(Rele_SA, true, "PT");
   delay(250);
@@ -6884,7 +5157,6 @@ void executa_pt() {
 
   while (cont13 == 1) {
     Watch_Dog();
-    buzzerTestTick();
     delay(1);
     
     // Verifica parada via BLE
@@ -6897,7 +5169,6 @@ void executa_pt() {
         AT_SEG();
         cont13 = 0;
         contador = 0;
-        buzzerPulseStop();
         return;
       }
     }
@@ -6916,7 +5187,6 @@ void executa_pt() {
       contador = 0;
 
       bip();
-      buzzerPulseStop();
       faz_bt_seg = 0;
       Serial.println("Fim PT");
       enviarBLE("PT:DONE");
@@ -6970,7 +5240,7 @@ void executa_M1() {
     preferences.putInt("encoder_asento", incoder_virtual_asento_M1);
     preferences.end();
     
-    preferences.begin("encoder_pern", false);
+    preferences.begin("encoder_perneira", false);
     preferences.putInt("encoder_perneira", incoder_virtual_perneira_M1);
     preferences.end();
 
@@ -7097,30 +5367,33 @@ void executa_M1() {
 
 // ========== PARADA DE EMERGÃŠNCIA (AT_SEG) ==========
 void AT_SEG() {
-  Serial.println("Parando todos os movimentos");
-  enviarBLE("AT_SEG:STOPPING");
+  if (faz_bt_seg == 1) {
+    Serial.println("Parando todos os movimentos");
+    enviarBLE("AT_SEG:STOPPING");
 
-  setOutputPin(Rele_DE, false, "AT_SEG");
-  setOutputPin(Rele_SE, false, "AT_SEG");
-  setOutputPin(Rele_SA, false, "AT_SEG");
-  setOutputPin(Rele_DA, false, "AT_SEG");
-  setOutputPin(Rele_SP, false, "AT_SEG");
-  setOutputPin(Rele_DP, false, "AT_SEG");
-  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "AT_SEG");
-  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "AT_SEG");
+    setOutputPin(Rele_DE, false, "AT_SEG");
+    setOutputPin(Rele_SE, false, "AT_SEG");
+    setOutputPin(Rele_SA, false, "AT_SEG");
+    setOutputPin(Rele_DA, false, "AT_SEG");
+    setOutputPin(Rele_SP, false, "AT_SEG");
+    setOutputPin(Rele_DP, false, "AT_SEG");
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "AT_SEG");
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "AT_SEG");
 
-  estado_de = false;
-  estado_se = false;
-  estado_sa = false;
-  estado_da = false;
-  estado_sp = false;
-  estado_dp = false;
-  estado_trend_sobe = false;
-  estado_trend_desce = false;
+    // Atualiza estados
+    estado_de = false;
+    estado_se = false;
+    estado_sa = false;
+    estado_da = false;
+    estado_sp = false;
+    estado_dp = false;
+    estado_trend_sobe = false;
+    estado_trend_desce = false;
 
-  faz_bt_seg = 0;
-  cont = 0;
-  cont13 = 0;
+    faz_bt_seg = 0;
+    cont = 0;
+    cont13 = 0;
+  }
   delay(100);
 }
 
@@ -7128,12 +5401,6 @@ void AT_SEG() {
 void bip() {
   digitalWrite(BUZZER, HIGH);
   delay(100);
-  digitalWrite(BUZZER, LOW);
-}
-
-void bipLong() {
-  digitalWrite(BUZZER, HIGH);
-  delay(400);
   digitalWrite(BUZZER, LOW);
 }
 
@@ -7168,11 +5435,6 @@ void monitoraSistema() {
 #endif
   Serial.print("Horimetro: "); Serial.println(horimetro);
   Serial.print("Cadeira Habilitada: "); Serial.println(cadeiraHabilitada ? "SIM" : "NAO");
-  if (!cadeiraHabilitada && !buzzerTestEnabled) {
-    bip(); delay(120);
-    bip(); delay(120);
-    bip();
-  }
   Serial.print("MQTT Status: ");
   bool mqttConnected = mqttClient.connected();
   String hostSnapshot;
