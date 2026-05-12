@@ -222,11 +222,13 @@ static void processaComandosSerialDebug() {
   while (Serial.available() > 0) {
     char c = static_cast<char>(Serial.read());
     lastRxAtMs = millis();
+    // Serial.write(c); // Echo opcional se o monitor não tiver
     if (c == '\n' || c == '\r') {
       if (serialCmd.length() > 0) {
         String cmd = serialCmd;
         serialCmd = "";
         cmd.trim();
+        Serial.print("\n[SERIAL] Executando: "); Serial.println(cmd);
         executaComandoBluetooth(cmd, "SERIAL");
       }
       continue;
@@ -235,11 +237,12 @@ static void processaComandosSerialDebug() {
       serialCmd += c;
     }
   }
-  if (serialCmd.length() > 0 && lastRxAtMs > 0 && (millis() - lastRxAtMs) > 150) {
+  if (serialCmd.length() > 0 && lastRxAtMs > 0 && (millis() - lastRxAtMs) > 200) {
     String cmd = serialCmd;
     serialCmd = "";
     cmd.trim();
     if (cmd.length() > 0) {
+      Serial.print("\n[SERIAL_TIMEOUT] Executando: "); Serial.println(cmd);
       executaComandoBluetooth(cmd, "SERIAL");
     }
   }
@@ -545,19 +548,16 @@ static void IO_begin() {
   pcf8574CachedAtMs = millis();
   pcf8574LastIn = pcf8574CachedIn;
   if (PCF8574_INT_PIN >= 0) {
-    if (PCF8574_INT_PIN == 1) {
-      Serial.println("[PCF8574_INT] GPIO1 instavel nesta placa. Usando polling (sem interrupcao).");
+    int irq = digitalPinToInterrupt(static_cast<uint8_t>(PCF8574_INT_PIN));
+    if (irq < 0) {
+      Serial.println("[PCF8574_INT] Pino nao suporta interrupcao. Usando polling.");
       pcf8574UseInterrupt = false;
     } else {
-      int irq = digitalPinToInterrupt(static_cast<uint8_t>(PCF8574_INT_PIN));
-      if (irq < 0) {
-        Serial.println("[PCF8574_INT] Pino nao suporta interrupcao. Usando polling.");
-        pcf8574UseInterrupt = false;
-      } else {
-        pinMode(static_cast<uint8_t>(PCF8574_INT_PIN), INPUT_PULLUP);
-        attachInterrupt(irq, IO_onPcf8574Interrupt, FALLING);
-        pcf8574UseInterrupt = true;
-      }
+      pinMode(static_cast<uint8_t>(PCF8574_INT_PIN), INPUT_PULLUP);
+      attachInterrupt(irq, IO_onPcf8574Interrupt, FALLING);
+      pcf8574UseInterrupt = true;
+      Serial.print("[PCF8574_INT] Interrupcao habilitada no GPIO ");
+      Serial.println(PCF8574_INT_PIN);
     }
   } else {
     pcf8574UseInterrupt = false;
@@ -2887,10 +2887,12 @@ static uint64_t motorTravelUnsavedEncosto = 0;
 static uint64_t motorTravelUnsavedAssento = 0;
 static uint64_t motorTravelUnsavedPerneira = 0;
 static uint64_t motorTravelUnsavedTrend = 0;
-static float mmPerPulseEncosto = 0.01f;
-static float mmPerPulseAssento = 0.01f;
-static float mmPerPulsePerneira = 0.01f;
-static float mmPerPulseTrend = 0.01f;
+static float mmPerPulseEncosto = 0.077f;
+static float mmPerPulseAssento = 0.077f;
+static float mmPerPulsePerneira = 0.077f;
+static float mmPerPulseTrend = 0.077f;
+static float maintenanceLimitKm = 5.0f; // Limite para manutencao em Quilometros (Ex: 5km)
+static bool maintenanceRequired = false;
 static uint32_t motorTravelNextSaveMs = 0;
 static uint32_t motorTravelNextSendMs = 0;
 static const uint32_t MOTOR_TRAVEL_SAVE_INTERVAL_MS = 10000;
@@ -4533,6 +4535,30 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     Serial.println("[ENC] RESET");
     return;
   }
+
+  if (cmd.startsWith("SET_ENC_VIRTUAL=")) {
+    // Formato: SET_ENC_VIRTUAL=ENC,ASS,PER (ex: SET_ENC_VIRTUAL=100,200,300)
+    String vals = cmd.substring(16);
+    int firstComma = vals.indexOf(',');
+    int lastComma = vals.lastIndexOf(',');
+    if (firstComma > 0 && lastComma > firstComma) {
+      incoder_virtual_encosto_service = vals.substring(0, firstComma).toInt();
+      incoder_virtual_asento_service = vals.substring(firstComma + 1, lastComma).toInt();
+      incoder_virtual_perneira_service = vals.substring(lastComma + 1).toInt();
+      Serial.println("[ENC] Posicoes virtuais alteradas manualmente.");
+      Serial.print("ENC="); Serial.print(incoder_virtual_encosto_service);
+      Serial.print(" ASS="); Serial.print(incoder_virtual_asento_service);
+      Serial.print(" PER="); Serial.println(incoder_virtual_perneira_service);
+    }
+    return;
+  }
+
+  if (cmd == "SAVE_ENC") {
+    saveMotorTravelPreferences(true);
+    Serial.println("[ENC] Salvamento manual realizado (force=true).");
+    return;
+  }
+
   if (cmd == "ENC_MON_ON") {
     encoderMonEnabled = true;
     encoderMonNextMs = 0;
@@ -4543,6 +4569,20 @@ void executaComandoBluetooth(String cmd, const char* origin) {
   if (cmd == "ENC_MON_OFF") {
     encoderMonEnabled = false;
     Serial.println("[ENC_MON] OFF");
+    return;
+  }
+
+  if (cmd.startsWith("SET_MAINT_KM=")) {
+    maintenanceLimitKm = cmd.substring(13).toFloat();
+    Serial.print("[MAINT] Limite alterado para: ");
+    Serial.print(maintenanceLimitKm);
+    Serial.println(" Km");
+    return;
+  }
+
+  if (cmd == "MAINT_RESET") {
+    maintenanceRequired = false;
+    Serial.println("[MAINT] Status de manutencao resetado.");
     return;
   }
 
@@ -5419,6 +5459,7 @@ static void loadMotorTravelPreferences() {
   mmPerPulsePerneira = p.isKey("mm_per") ? p.getFloat("mm_per", mmPerPulsePerneira) : mmPerPulsePerneira;
   mmPerPulseTrend = p.isKey("mm_trend") ? p.getFloat("mm_trend", mmPerPulseTrend) : mmPerPulseTrend;
   p.end();
+  Serial.println("\n[TRAVEL] --- RECUPERACAO DE DADOS ---");
   Serial.print("[TRAVEL] PULSOS ENC=");
   Serial.print(static_cast<uint32_t>(motorTravelPulsesEncosto));
   Serial.print(" ASS=");
@@ -5427,12 +5468,14 @@ static void loadMotorTravelPreferences() {
   Serial.print(static_cast<uint32_t>(motorTravelPulsesPerneira));
   Serial.print(" TREND=");
   Serial.println(static_cast<uint32_t>(motorTravelPulsesTrend));
+  
   Serial.print("[TRAVEL] POS_VIRTUAL ENC=");
   Serial.print(incoder_virtual_encosto_service);
   Serial.print(" ASS=");
   Serial.print(incoder_virtual_asento_service);
   Serial.print(" PER=");
   Serial.println(incoder_virtual_perneira_service);
+  Serial.println("[TRAVEL] ----------------------------\n");
 }
 
 static void saveMotorTravelPreferences(bool force) {
@@ -5487,21 +5530,33 @@ static bool supabaseUpsertMotorTravel() {
   double ass_m = (static_cast<double>(motorTravelPulsesAssento) * mmPerPulseAssento) / 1000.0;
   double per_m = (static_cast<double>(motorTravelPulsesPerneira) * mmPerPulsePerneira) / 1000.0;
   double tre_m = (static_cast<double>(motorTravelPulsesTrend) * mmPerPulseTrend) / 1000.0;
+  
+  // Distancia individual em Km
+  double enc_km = enc_m / 1000.0;
+  double ass_km = ass_m / 1000.0;
+  double per_km = per_m / 1000.0;
+  double tre_km = tre_m / 1000.0;
 
-  StaticJsonDocument<640> doc;
+  // Verifica se QUALQUER motor ultrapassou o limite de manutencao individual
+  if (enc_km >= maintenanceLimitKm || ass_km >= maintenanceLimitKm || 
+      per_km >= maintenanceLimitKm || tre_km >= maintenanceLimitKm) {
+    maintenanceRequired = true;
+  }
+
+  StaticJsonDocument<768> doc;
   doc["chair_serial"] = NUMERO_SERIE_CADEIRA;
   doc["encosto_pulses"] = static_cast<double>(motorTravelPulsesEncosto);
   doc["assento_pulses"] = static_cast<double>(motorTravelPulsesAssento);
   doc["perneira_pulses"] = static_cast<double>(motorTravelPulsesPerneira);
   doc["trend_pulses"] = static_cast<double>(motorTravelPulsesTrend);
-  doc["encosto_m"] = enc_m;
-  doc["assento_m"] = ass_m;
-  doc["perneira_m"] = per_m;
-  doc["trend_m"] = tre_m;
-  doc["mm_per_pulse_encosto"] = mmPerPulseEncosto;
-  doc["mm_per_pulse_assento"] = mmPerPulseAssento;
-  doc["mm_per_pulse_perneira"] = mmPerPulsePerneira;
-  doc["mm_per_pulse_trend"] = mmPerPulseTrend;
+  
+  doc["encosto_km"] = enc_km;
+  doc["assento_km"] = ass_km;
+  doc["perneira_km"] = per_km;
+  doc["trend_km"] = tre_km;
+  
+  doc["maintenance_limit_km"] = maintenanceLimitKm;
+  doc["maintenance_required"] = maintenanceRequired;
   doc["updated_at"] = getTimestamp();
 
   String payload;
