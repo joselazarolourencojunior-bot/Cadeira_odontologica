@@ -222,7 +222,7 @@ static void processaComandosSerialDebug() {
   while (Serial.available() > 0) {
     char c = static_cast<char>(Serial.read());
     lastRxAtMs = millis();
-    // Serial.write(c); // Echo opcional se o monitor não tiver
+    
     if (c == '\n' || c == '\r') {
       if (serialCmd.length() > 0) {
         String cmd = serialCmd;
@@ -233,11 +233,17 @@ static void processaComandosSerialDebug() {
       }
       continue;
     }
-    if (serialCmd.length() < 64) {
-      serialCmd += c;
+    
+    // Aceita apenas caracteres imprimiveis (ASCII 32 a 126)
+    if (c >= 32 && c <= 126) {
+      if (serialCmd.length() < 64) {
+        serialCmd += c;
+      }
     }
   }
-  if (serialCmd.length() > 0 && lastRxAtMs > 0 && (millis() - lastRxAtMs) > 200) {
+  
+  // Aumentado timeout para 500ms para evitar disparos falsos por ruido ou digitacao lenta
+  if (serialCmd.length() > 0 && lastRxAtMs > 0 && (millis() - lastRxAtMs) > 500) {
     String cmd = serialCmd;
     serialCmd = "";
     cmd.trim();
