@@ -20,6 +20,10 @@ class ChairState {
   int seatPosition;
   int legPosition;
 
+  int backMax;
+  int seatMax;
+  int legMax;
+
   // Status WiFi
   bool wifiConnected;
   String? wifiSsid;
@@ -58,6 +62,9 @@ class ChairState {
     this.backPosition = 0,
     this.seatPosition = 0,
     this.legPosition = 0,
+    this.backMax = 0,
+    this.seatMax = 0,
+    this.legMax = 0,
     this.wifiConnected = false,
     this.wifiSsid,
     this.wifiIp,
@@ -89,6 +96,9 @@ class ChairState {
       'backPosition': backPosition,
       'seatPosition': seatPosition,
       'legPosition': legPosition,
+      'backMax': backMax,
+      'seatMax': seatMax,
+      'legMax': legMax,
       'wifiConnected': wifiConnected,
       'wifiSsid': wifiSsid,
       'wifiIp': wifiIp,
@@ -121,6 +131,9 @@ class ChairState {
       backPosition: json['backPosition'] ?? json['encosto_pos'] ?? 0,
       seatPosition: json['seatPosition'] ?? json['assento_pos'] ?? 0,
       legPosition: json['legPosition'] ?? json['perneira_pos'] ?? 0,
+      backMax: json['backMax'] ?? json['encosto_max'] ?? 0,
+      seatMax: json['seatMax'] ?? json['assento_max'] ?? 0,
+      legMax: json['legMax'] ?? json['perneira_max'] ?? 0,
       wifiConnected: json['wifiConnected'] ?? json['wifi'] ?? false,
       wifiSsid: json['wifiSsid'] ?? json['wifi_ssid'],
       wifiIp: json['wifiIp'],

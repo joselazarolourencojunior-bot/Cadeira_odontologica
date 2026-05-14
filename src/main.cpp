@@ -30,6 +30,7 @@
 #include <freertos/queue.h>
 #include <esp_idf_version.h>
 #include <esp_task_wdt.h>
+#include "driver/gpio.h"
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 
@@ -127,6 +128,15 @@ static const int IO_PCF_BASE = 100;
 #define PIN_ENCODER_TREND 46
 #endif
 
+#ifndef DISABLE_TREND_ENCODER
+#define DISABLE_TREND_ENCODER 1
+#endif
+
+#if DISABLE_TREND_ENCODER
+#undef PIN_ENCODER_TREND
+#define PIN_ENCODER_TREND -1
+#endif
+
 #ifndef I2C_EARLY_TEST
 #define I2C_EARLY_TEST 0
 #endif
@@ -145,6 +155,10 @@ static const int IO_PCF_BASE = 100;
 
 #ifndef TEST_MODE
 #define TEST_MODE 0
+#endif
+
+#ifndef OFFLINE_DEMO
+#define OFFLINE_DEMO 0
 #endif
 
 #ifndef FIRMWARE_VERSION
@@ -678,8 +692,9 @@ static TaskHandle_t mqttTaskHandle = NULL;
 typedef struct { char cmd[64]; } MqttCmdItem;
 typedef struct { char topic[96]; char payload[768]; bool retain; } MqttTxItem;
 String MQTT_TOPIC_BASE = "";
-static bool ignoreLimitLocks = (TEST_MODE != 0);
-static bool ignoreGavetaLock = (TEST_MODE != 0);
+static bool ignoreLimitLocks = true;
+static bool ignoreGavetaLock = true;
+static bool seatTravelLearned = false;
 static volatile bool mqttStatusDirty = false;
 static uint32_t mqttLastStatusPublishMs = 0;
 static bool otaInProgress = false;
@@ -852,6 +867,7 @@ String geraNumeroSerieDoMAC();
 void processaComandosBluetooth();
 void executaComandoBluetooth(String cmd, const char* origin);
 void enviaStatusBluetooth();
+static void bleStatusStreamTick();
 void iniciaTimerMotor();
 void paraTimerMotor();
 void atualizaHorimetro();
@@ -886,6 +902,8 @@ void bipLong();
 void enviarBLE(String msg);
 void verificaBotaoResetWifi();
 void resetaConfiguracoesWifi();
+static void resetParaPrimeiraVez();
+static void checkBootHoldResetTudo();
 static void supabaseLogUsage(const char* action);
 static void supabaseCreateMaintenanceRequestIfNeeded();
 static void supabaseSaveMemoryPosition(int slot);
@@ -893,6 +911,7 @@ static bool supabaseLoadMemoryPositionFromDb(int slot);
 static bool supabaseGetJson(const String& restPath, String& responseOut);
 static void loadMotorTravelPreferences();
 static void saveMotorTravelPreferences(bool force);
+static void motorTravelAutosaveTick();
 static void sendMotorTravelToSupabaseIfNeeded();
 static bool supabaseUpsertMotorTravel();
 static bool mqttPublish(const String& topic, const String& payload, bool retain);
@@ -915,6 +934,15 @@ extern const int TREN_INT_DESCE;
 extern const int INT_TREND_DESCE;
 extern const int TREN_INT_SOBE;
 extern const int INT_TREND_SOBE;
+extern bool faz_m1;
+extern bool vzInicialEmAndamento;
+extern unsigned long ultimoComandoBLE;
+extern String ultimoCmdBLE;
+extern unsigned long ultimoComandoRemoto;
+extern unsigned long ultimoComandoTrendSobe;
+extern unsigned long ultimoComandoTrendDesce;
+extern unsigned long lastTrendCmdMs;
+extern bool trendRemoteActive;
 
 // ========== FUNÇÕES MQTT ==========
 static bool mqttPublish(const String& topic, const String& payload, bool retain) {
@@ -1651,7 +1679,7 @@ static void otaTick() {
 
 static bool mqttIsControlCommand(const String& cmdUpper) {
   return cmdUpper == "DE" || cmdUpper == "SE" || cmdUpper == "SA" || cmdUpper == "DA" ||
-         cmdUpper == "SP" || cmdUpper == "DP" || cmdUpper == "TS" || cmdUpper == "TD" || cmdUpper == "TREND_TEST" || cmdUpper == "RF" || cmdUpper == "VZ" ||
+         cmdUpper == "SP" || cmdUpper == "DP" || cmdUpper == "TS" || cmdUpper == "TD" || cmdUpper == "T0" || cmdUpper == "TREND_TEST" || cmdUpper == "RF" || cmdUpper == "VZ" ||
          cmdUpper == "PT" || cmdUpper == "M1" || cmdUpper == "STOP" || cmdUpper == "AT_SEG" ||
          cmdUpper == "STATUS";
 }
@@ -2177,16 +2205,23 @@ class MyServerCallbacks: public BLEServerCallbacks {
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO DESCONECTADO");
     Serial.println("====================================");
+    Serial.println("[BLE] disconnect -> STOP ALL");
+    AT_SEG();
+    comandoBLE = "";
+    ultimoCmdBLE = "";
+    ultimoComandoBLE = 0;
+    ultimoComandoRemoto = 0;
+    ultimoComandoTrendSobe = 0;
+    ultimoComandoTrendDesce = 0;
+    lastTrendCmdMs = 0;
+    trendRemoteActive = false;
+    faz_m1 = false;
+    vzInicialEmAndamento = false;
     delay(500);
-    if (WiFi.status() == WL_CONNECTED && mqttClient.connected()) {
-      pServer->startAdvertising();
-      bleAdvertisingAtivo = true;
-      Serial.println("[BLE] Advertising reiniciado");
-      Serial.println("Aguardando nova conexao...");
-    } else {
-      bleAdvertisingAtivo = false;
-      Serial.println("[BLE] Advertising bloqueado (aguardando WiFi+MQTT)");
-    }
+    pServer->startAdvertising();
+    bleAdvertisingAtivo = true;
+    Serial.println("[BLE] Advertising reiniciado");
+    Serial.println("Aguardando nova conexao...");
     Serial.println("====================================\n");
   }
 };
@@ -2210,7 +2245,10 @@ class MyCallbacks: public BLECharacteristicCallbacks {
 
 #if HAS_BLE
 static void bleAtualizaDisponibilidade() {
-  bool permitido = (WiFi.status() == WL_CONNECTED && mqttClient.connected());
+  bool permitido = true;
+#if !OFFLINE_DEMO
+  permitido = (WiFi.status() == WL_CONNECTED && mqttClient.connected());
+#endif
   if (!permitido) {
     if (bleAdvertising && !bleClienteConectado) {
       bleAdvertising->stop();
@@ -2280,6 +2318,17 @@ void enviarBLE(String msg) {
 #endif
 }
 
+static void enviarBLEQuiet(String msg) {
+#if HAS_BLE
+  if (bleClienteConectado && pCharacteristicTX != NULL) {
+    pCharacteristicTX->setValue(msg.c_str());
+    pCharacteristicTX->notify();
+  }
+#else
+  (void)msg;
+#endif
+}
+
 // Constantes - Pinos de ENTRADA (botÃµes)
 const int M1 = PCF_PIN(0);
 const int SE = PCF_PIN(1);
@@ -2293,6 +2342,7 @@ const int SA = PIN_SA;
 const int RF = PIN_RF;
 int GAVETA = PIN_GAVETA;
 static int gavetaIdleLevel = -1;
+static int rfIdleLevel = -1;
 const int ENCODER1 = PIN_ENCODER1;
 const int ENCODER2 = PIN_ENCODER2;
 const int ENCODER3 = PIN_ENCODER3;
@@ -2342,6 +2392,32 @@ static bool isGavetaAbertaRaw() {
     return digitalRead(GAVETA) == LOW;
   }
   return digitalRead(GAVETA) != gavetaIdleLevel;
+}
+
+static uint32_t userButtonMaskRaw() {
+  uint32_t mask = 0;
+  if (digitalRead(M1) == LOW) mask |= (1U << 0);
+  if (digitalRead(SE) == LOW) mask |= (1U << 1);
+  if (digitalRead(PT) == LOW) mask |= (1U << 2);
+  if (digitalRead(VZ) == LOW) mask |= (1U << 3);
+  if (digitalRead(DP) == LOW) mask |= (1U << 4);
+  if (digitalRead(SP) == LOW) mask |= (1U << 5);
+  if (digitalRead(DE) == LOW) mask |= (1U << 6);
+  if (digitalRead(DA) == LOW) mask |= (1U << 7);
+  if (digitalRead(SA) == LOW) mask |= (1U << 8);
+
+  if (RF >= 0) {
+    bool rfRaw = digitalRead(RF);
+    bool rfPressed = (rfIdleLevel >= 0) ? (rfRaw != (rfIdleLevel != 0)) : (rfRaw == LOW);
+    if (rfPressed) mask |= (1U << 9);
+  }
+
+  if (isGavetaAbertaRaw()) mask |= (1U << 10);
+  return mask;
+}
+
+static bool isAnyUserButtonActiveRaw() {
+  return userButtonMaskRaw() != 0;
 }
 
 extern int fim_encosto_encoder;
@@ -2484,6 +2560,9 @@ static void applyMqttRuntimeConfig() {
 #endif
 #ifndef PIN_BUZZER
 #define PIN_BUZZER 32
+#endif
+#ifndef PIN_BOOT_BUTTON
+#define PIN_BOOT_BUTTON 0
 #endif
 
 const int Rele_SA = PIN_RELE_SA;
@@ -2642,16 +2721,29 @@ static const char* relayLabelByPin(int pin) {
 #ifndef RELE_DP_ACTIVE_LOW
 #define RELE_DP_ACTIVE_LOW 0
 #endif
+#ifndef RELE_SE_ACTIVE_LOW
+#define RELE_SE_ACTIVE_LOW 0
+#endif
+#ifndef RELE_DE_ACTIVE_LOW
+#define RELE_DE_ACTIVE_LOW 0
+#endif
+
+static inline bool relayActiveLowForPin(int pin) {
+  if (pin == Rele_DP) return RELE_DP_ACTIVE_LOW;
+  if (pin == Rele_SE) return RELE_SE_ACTIVE_LOW;
+  if (pin == Rele_DE) return RELE_DE_ACTIVE_LOW;
+  return false;
+}
 
 static inline int relayLevelForWrite(int pin, bool on) {
-  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
+  if (relayActiveLowForPin(pin)) {
     return on ? LOW : HIGH;
   }
   return on ? HIGH : LOW;
 }
 
 static inline bool relayIsOn(int pin) {
-  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
+  if (relayActiveLowForPin(pin)) {
     return digitalRead(pin) == LOW;
   }
   return digitalRead(pin) == HIGH;
@@ -2775,7 +2867,7 @@ static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
   Serial.print(readBack == HIGH ? "1" : "0");
   Serial.print(" ON=");
   Serial.print(relayIsOn(pin) ? "1" : "0");
-  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
+  if (relayActiveLowForPin(pin)) {
     Serial.print(" ALOW=1");
   }
   if (src && src[0] != '\0') {
@@ -2817,6 +2909,7 @@ static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
 
 static int botaoResetWifiPin = RF;
 static bool rfHabilitado = true;
+static bool ignoreButtonsUntilRelease = false;
 
 // VariÃ¡veis de estado dos botÃµes
 int buttonState = 0;
@@ -2915,6 +3008,33 @@ static uint32_t encoderMonLastEnc = 0;
 static uint32_t encoderMonLastAss = 0;
 static uint32_t encoderMonLastPer = 0;
 static uint32_t encoderMonLastTrend = 0;
+static uint8_t encRequiredMask = 0;
+
+static inline bool encReqEncosto() { return (encRequiredMask & 0x01) != 0; }
+static inline bool encReqAssento() { return (encRequiredMask & 0x02) != 0; }
+static inline bool encReqPerneira() { return (encRequiredMask & 0x04) != 0; }
+static inline bool encReqTrend() { return (encRequiredMask & 0x08) != 0; }
+
+static int relayPinByToken(String token) {
+  token.trim();
+  token.toUpperCase();
+
+  if (token == "SA" || token == "RELE_SA") return Rele_SA;
+  if (token == "DA" || token == "RELE_DA") return Rele_DA;
+  if (token == "SE" || token == "RELE_SE") return Rele_SE;
+  if (token == "DE" || token == "RELE_DE") return Rele_DE;
+  if (token == "SP" || token == "RELE_SP") return Rele_SP;
+  if (token == "DP" || token == "RELE_DP") return Rele_DP;
+
+  if (token == "TS" || token == "TREND_SOBE" || token == "RELE_TREND_SOBE") return Rele_TREND_SOBE;
+  if (token == "TD" || token == "TREND_DESCE" || token == "RELE_TREND_DESCE") return Rele_TREND_DESCE;
+
+  if (token == "RF" || token == "REFLETOR" || token == "RELE_REFLETOR") return Rele_refletor;
+  if (token == "LED") return LED;
+  if (token == "BUZZER" || token == "BZ") return BUZZER;
+
+  return -1;
+}
 
 static inline void encoderMonResetCounters() {
   encoderMonLastEnc = pulses_encosto;
@@ -2955,10 +3075,50 @@ static void encoderMonTick() {
 // ENCODER1 -> Assento
 // ENCODER2 -> Perneira
 // ENCODER3 -> Encosto
-static void IRAM_ATTR isr_encoder1() { pulses_assento++; }
-static void IRAM_ATTR isr_encoder2() { pulses_perneira++; }
-static void IRAM_ATTR isr_encoder3() { pulses_encosto++; }
-static void IRAM_ATTR isr_encoder_trend() { pulses_trend++; }
+static volatile int8_t encoder1IdleLevel = -1;
+static volatile int8_t encoder2IdleLevel = -1;
+static volatile int8_t encoder3IdleLevel = -1;
+static volatile int8_t encoderTrendIdleLevel = -1;
+
+static void IRAM_ATTR isr_encoder1() {
+  if (encoder1IdleLevel >= 0 && gpio_get_level(static_cast<gpio_num_t>(ENCODER1)) != encoder1IdleLevel) {
+    pulses_assento++;
+  }
+}
+
+static void IRAM_ATTR isr_encoder2() {
+  if (encoder2IdleLevel >= 0 && gpio_get_level(static_cast<gpio_num_t>(ENCODER2)) != encoder2IdleLevel) {
+    pulses_perneira++;
+  }
+}
+
+static void IRAM_ATTR isr_encoder3() {
+  if (encoder3IdleLevel >= 0 && gpio_get_level(static_cast<gpio_num_t>(ENCODER3)) != encoder3IdleLevel) {
+    pulses_encosto++;
+  }
+}
+
+static void IRAM_ATTR isr_encoder_trend() {
+  if (encoderTrendIdleLevel >= 0 && gpio_get_level(static_cast<gpio_num_t>(ENCODER_TREND)) != encoderTrendIdleLevel) {
+    pulses_trend++;
+  }
+}
+
+static bool gpioIsrServiceReady = false;
+static void IRAM_ATTR isr_encoder2_idf(void *arg) {
+  (void)arg;
+  if (encoder2IdleLevel >= 0 && gpio_get_level(static_cast<gpio_num_t>(ENCODER2)) != encoder2IdleLevel) {
+    pulses_perneira++;
+  }
+}
+
+static inline void ensureGpioIsrService() {
+  if (gpioIsrServiceReady) return;
+  esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+  if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
+    gpioIsrServiceReady = true;
+  }
+}
 
 // Debounce para comandos BLE
 unsigned long ultimoComandoBLE = 0;
@@ -2975,7 +3135,15 @@ unsigned long ultimoComandoSP = 0;
 unsigned long ultimoComandoDP = 0;
 unsigned long ultimoComandoTrendSobe = 0;
 unsigned long ultimoComandoTrendDesce = 0;
-const uint32_t VZ_MAX_TIME_MS = 15000;
+const unsigned long TREND_WATCHDOG_MS = 2500;
+unsigned long lastTrendCmdMs = 0;
+bool trendRemoteActive = false;
+const uint32_t VZ_MAX_TIME_MS = 40000;
+const uint32_t VZ_NO_PULSE_FINISH_MS = 700;
+const uint32_t VZ_NO_PULSE_START_ABORT_MS = 2000;
+const uint32_t M1_HOLD_SAVE_MS = 3000;
+const int LIMIT_STOP_MARGIN_PULSES = 30;
+const uint32_t M1_STALL_TIMEOUT_MS = 1200;
 
 // Flags para controle de fim de curso do encoder
 bool en_SA_acabou = false;
@@ -3001,7 +3169,6 @@ unsigned long ultimoMillisEncoder = 0;
 unsigned long ultimoMillisPiscaLed = 0;
 bool estadoLedPisca = false;
 const unsigned long INTERVALO_ENCODER = 250;
-bool habilitaEncoderVirtual = true; // Controle para desabilitar encoder durante VZ inicial
 bool vzInicialEmAndamento = false; // Flag para bloquear loop() durante VZ inicial
 
 void monitoraSistema();
@@ -3028,6 +3195,8 @@ void setup() {
   esp_task_wdt_deinit();
   esp_task_wdt_init(120, true);
 #endif
+
+  checkBootHoldResetTudo();
 
 #if I2C_EARLY_TEST
   #if defined(I2C_SDA) && defined(I2C_SCL)
@@ -3076,12 +3245,14 @@ void setup() {
   
   // Define base dos tópicos MQTT
   MQTT_TOPIC_BASE = NUMERO_SERIE_CADEIRA + "/";
+  #if !OFFLINE_DEMO
   loadMqttPreferences();
   applyMqttRuntimeConfig();
+  #endif
   
   // Gera nome do dispositivo (últimos 4 dígitos do MAC)
   uint8_t mac[6];
-  WiFi.macAddress(mac);
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
   char nomeTemp[20];
   snprintf(nomeTemp, sizeof(nomeTemp), "CadeiraOdonto-%02X%02X", mac[4], mac[5]);
   NOME_DISPOSITIVO = String(nomeTemp);
@@ -3097,6 +3268,15 @@ void setup() {
   // Inicializa pinos de entrada com pull-up
   loadGavetaPinPreference();
   loadCalibracaoLimites();
+  {
+    Preferences p;
+    if (p.begin("cadeira", true)) {
+      bool done = p.getBool("cal_done", false);
+      ignoreLimitLocks = !done;
+      ignoreGavetaLock = !done;
+      p.end();
+    }
+  }
   pinMode(DE, INPUT_PULLUP);
   pinMode(SA, INPUT_PULLUP);
   pinMode(DA, INPUT_PULLUP);
@@ -3145,31 +3325,60 @@ void setup() {
     gavetaIdleLevel = -1;
   }
   pinMode(ENCODER1, INPUT_PULLUP);
+  if (ENCODER2 >= 0) gpio_reset_pin(static_cast<gpio_num_t>(ENCODER2));
   pinMode(ENCODER2, INPUT_PULLUP);
   pinMode(ENCODER3, INPUT_PULLUP);
   if (ENCODER_TREND >= 0) {
     pinMode(ENCODER_TREND, INPUT_PULLUP);
   }
+
+  if (ENCODER1 >= 0) encoder1IdleLevel = static_cast<int8_t>(gpio_get_level(static_cast<gpio_num_t>(ENCODER1)));
+  if (ENCODER2 >= 0) encoder2IdleLevel = static_cast<int8_t>(gpio_get_level(static_cast<gpio_num_t>(ENCODER2)));
+  if (ENCODER3 >= 0) encoder3IdleLevel = static_cast<int8_t>(gpio_get_level(static_cast<gpio_num_t>(ENCODER3)));
+  if (ENCODER_TREND >= 0) encoderTrendIdleLevel = static_cast<int8_t>(gpio_get_level(static_cast<gpio_num_t>(ENCODER_TREND)));
+  encRequiredMask = 0;
+  if (ENCODER3 >= 0) encRequiredMask |= 0x01;
+  if (ENCODER1 >= 0) encRequiredMask |= 0x02;
+  if (ENCODER2 >= 0) encRequiredMask |= 0x04;
+  if (ENCODER_TREND >= 0) encRequiredMask |= 0x08;
+
+  Serial.println("\n[DIAG_ENC] Verificando niveis logicos iniciais:");
+  Serial.print("[DIAG_ENC] ENC1(GPIO"); Serial.print(ENCODER1); Serial.print(") L="); Serial.println(digitalRead(ENCODER1));
+  Serial.print("[DIAG_ENC] ENC2(GPIO"); Serial.print(ENCODER2); Serial.print(") L="); Serial.println(digitalRead(ENCODER2));
+  Serial.print("[DIAG_ENC] ENC3(GPIO"); Serial.print(ENCODER3); Serial.print(") L="); Serial.println(digitalRead(ENCODER3));
+  if (ENCODER_TREND >= 0) {
+    Serial.print("[DIAG_ENC] TREND(GPIO"); Serial.print(ENCODER_TREND); Serial.print(") L="); Serial.println(digitalRead(ENCODER_TREND));
+  }
+
   if (TEST_MODE) {
     Serial.println("[ENC] TEST_MODE=1: interrupcoes de encoder desabilitadas");
   } else {
     if (ENCODER1 >= 0 && ENCODER1 != I2C_SDA && ENCODER1 != I2C_SCL && ENCODER1 != Rele_refletor) {
-      attachInterrupt(digitalPinToInterrupt(ENCODER1), isr_encoder1, FALLING);
+      attachInterrupt(digitalPinToInterrupt(ENCODER1), isr_encoder1, CHANGE);
     } else {
       Serial.println("[ENC] ENCODER1 desabilitado");
     }
     if (ENCODER2 >= 0 && ENCODER2 != I2C_SDA && ENCODER2 != I2C_SCL && ENCODER2 != Rele_refletor) {
-      attachInterrupt(digitalPinToInterrupt(ENCODER2), isr_encoder2, FALLING);
+      if (ENCODER2 >= 39) {
+        ensureGpioIsrService();
+        gpio_set_direction(static_cast<gpio_num_t>(ENCODER2), GPIO_MODE_INPUT);
+        gpio_set_pull_mode(static_cast<gpio_num_t>(ENCODER2), GPIO_PULLUP_ONLY);
+        gpio_set_intr_type(static_cast<gpio_num_t>(ENCODER2), GPIO_INTR_ANYEDGE);
+        gpio_isr_handler_add(static_cast<gpio_num_t>(ENCODER2), isr_encoder2_idf, nullptr);
+        gpio_intr_enable(static_cast<gpio_num_t>(ENCODER2));
+      } else {
+        attachInterrupt(digitalPinToInterrupt(ENCODER2), isr_encoder2, CHANGE);
+      }
     } else {
       Serial.println("[ENC] ENCODER2 desabilitado");
     }
     if (ENCODER3 >= 0 && ENCODER3 != I2C_SDA && ENCODER3 != I2C_SCL && ENCODER3 != Rele_refletor) {
-      attachInterrupt(digitalPinToInterrupt(ENCODER3), isr_encoder3, FALLING);
+      attachInterrupt(digitalPinToInterrupt(ENCODER3), isr_encoder3, CHANGE);
     } else {
       Serial.println("[ENC] ENCODER3 desabilitado");
     }
     if (ENCODER_TREND >= 0 && ENCODER_TREND != I2C_SDA && ENCODER_TREND != I2C_SCL && ENCODER_TREND != Rele_refletor) {
-      attachInterrupt(digitalPinToInterrupt(ENCODER_TREND), isr_encoder_trend, FALLING);
+      attachInterrupt(digitalPinToInterrupt(ENCODER_TREND), isr_encoder_trend, CHANGE);
     } else {
       Serial.println("[ENC] ENCODER_TREND desabilitado");
     }
@@ -3235,18 +3444,25 @@ void setup() {
   // Carrega dados salvos (encoder virtual e horÃ­metro)
   Serial.println("Carregando preferencias...");
   carregaPreferencias();
+  #if !OFFLINE_DEMO
   otaLoadPreferences();
+  #endif
   delay(500);
 
-  // Volta CPU para 240MHz antes do WiFi
   setCpuFrequencyMhz(240);
+  #if OFFLINE_DEMO
+  mqttConnectEnabled = false;
+  mqttReadyAtMs = 0;
+  otaEnabled = false;
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+  Serial.println("[OFFLINE_DEMO] WiFi/MQTT/NTP/Supabase/OTA desabilitados");
+  #else
   Serial.println("CPU em 240MHz - Iniciando WiFi...");
   delay(1000);
 
-  // Configura e conecta WiFi usando WiFiManager
   configuraWiFiManager();
 
-  // Inicializa MQTT se WiFi estiver conectado
   if (WiFi.status() == WL_CONNECTED) {
     mqttConnectEnabled = false;
     mqttReadyAtMs = 0;
@@ -3282,11 +3498,9 @@ void setup() {
   }
   otaValidateAfterBoot();
 
-  // Delay para estabilizar rede
   Serial.println("Aguardando estabilizacao da rede...");
   delay(2000);
 
-  // Sincroniza horário com servidor NTP
   if (WiFi.status() == WL_CONNECTED) {
     sincronizaNTP();
   }
@@ -3325,14 +3539,52 @@ void setup() {
     mqttConnectEnabled = true;
     mqttReadyAtMs = millis() + 1000;
   }
+  #endif
 
-  Serial.println("\n====================================");
-  Serial.println("  EXECUTANDO VZ INICIAL");
-  Serial.println("  (APOS WiFi/MQTT/Supabase)");
-  Serial.println("====================================");
-  executa_vz_ini();
-  Serial.println("[OK] VZ inicial finalizado.");
-  Serial.println("====================================\n");
+  bool precisaProgramarPercurso = true;
+  {
+    Preferences p;
+    if (p.begin("cadeira", true)) {
+      precisaProgramarPercurso = !p.getBool("cal_done", false);
+      p.end();
+    }
+  }
+
+  if (precisaProgramarPercurso) {
+    Serial.println("\n====================================");
+    Serial.println("  PROGRAMANDO PERCURSOS (1a VEZ)");
+    Serial.println("  SEQUENCIA: VZ -> PT -> SALVAR");
+    Serial.println("====================================");
+    executa_vz_ini();
+    cont13 = 1;
+    contador = 0;
+    executa_pt();
+
+    Preferences p;
+    if (p.begin("cadeira", false)) {
+      p.putInt("encosto_max", incoder_virtual_encosto_service);
+      p.putInt("assento_max", incoder_virtual_asento_service);
+      p.putInt("perneira_max", incoder_virtual_perneira_service);
+      p.putBool("cal_done", true);
+      p.end();
+    }
+    fim_encosto_encoder = incoder_virtual_encosto_service;
+    fim_asento_encoder = incoder_virtual_asento_service;
+    fim_perneira_encoder = incoder_virtual_perneira_service;
+    ignoreLimitLocks = false;
+    ignoreGavetaLock = false;
+    saveMotorTravelPreferences(true);
+
+    Serial.print("[OK] Percursos programados e salvos ENC=");
+    Serial.print(fim_encosto_encoder);
+    Serial.print(" ASS=");
+    Serial.print(fim_asento_encoder);
+    Serial.print(" PER=");
+    Serial.println(fim_perneira_encoder);
+    Serial.println("====================================\n");
+  } else {
+    Serial.println("\n[INFO] Percursos ja programados (cal_done=1). Pulando VZ/PT automatico.");
+  }
   
   Serial.println("\n====================================");
   Serial.println("       SISTEMA PRONTO!");
@@ -3342,7 +3594,11 @@ void setup() {
   Serial.print("Serial: ");
   Serial.println(NUMERO_SERIE_CADEIRA);
   Serial.print("WiFi: ");
+  #if OFFLINE_DEMO
+  Serial.println("OFFLINE_DEMO");
+  #else
   Serial.println(WiFi.status() == WL_CONNECTED ? "ONLINE" : "OFFLINE");
+  #endif
   Serial.print("Memoria livre: ");
   Serial.print(ESP.getFreeHeap());
   Serial.println(" bytes");
@@ -3541,6 +3797,7 @@ static void trendTickInputs() {
     if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_IN");
     estado_trend_sobe = false;
     estado_trend_desce = false;
+    trendRemoteActive = false;
     faz_bt_seg = 0;
     paraTimerMotor();
     if (!lastConflict) {
@@ -3556,6 +3813,8 @@ static void trendTickInputs() {
   if (up) {
     uint32_t now = millis();
     ultimoComandoTrendSobe = now;
+    lastTrendCmdMs = now;
+    trendRemoteActive = false;
     trendLastPulseAtMs = now;
     last_pulses_trend = pulses_trend;
 
@@ -3579,6 +3838,8 @@ static void trendTickInputs() {
   if (down) {
     uint32_t now = millis();
     ultimoComandoTrendDesce = now;
+    lastTrendCmdMs = now;
+    trendRemoteActive = false;
     trendLastPulseAtMs = now;
     last_pulses_trend = pulses_trend;
 
@@ -3600,6 +3861,9 @@ static void trendTickInputs() {
   }
 
   if (estado_trend_sobe || estado_trend_desce) {
+    if (trendRemoteActive) {
+      return;
+    }
     bool wasUp = estado_trend_sobe;
     bool wasDown = estado_trend_desce;
     if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_IN");
@@ -3679,7 +3943,7 @@ void verificaTimeoutMotores() {
     Serial.println("[TIMEOUT] Motor DP desligado por seguranca");
   }
 
-  // TS - Trend sobe
+  // TS/TD - Trend (watchdog tolerante)
   bool tsInputActive = false;
   if (TREN_INT_SOBE >= 0 || INT_TREND_SOBE >= 0) {
     if (TREN_INT_SOBE >= 0 && digitalRead(TREN_INT_SOBE) == HIGH) tsInputActive = true;
@@ -3687,23 +3951,29 @@ void verificaTimeoutMotores() {
   } else {
     if (INT_TREND_DESCE >= 0 && digitalRead(INT_TREND_DESCE) == HIGH) tsInputActive = true;
   }
-  if (estado_trend_sobe && !tsInputActive && (agora - ultimoComandoTrendSobe) > MOTOR_TIMEOUT) {
-    estado_trend_sobe = false;
-    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TIMEOUT");
-    faz_bt_seg = 0;
-    enviarBLE("TS:TIMEOUT");
-    Serial.println("[TIMEOUT] Motor TS desligado por seguranca");
-  }
-
-  // TD - Trend desce
   bool tdInputActive = false;
   if (TREN_INT_DESCE >= 0 && digitalRead(TREN_INT_DESCE) == HIGH) tdInputActive = true;
-  if (estado_trend_desce && !tdInputActive && (agora - ultimoComandoTrendDesce) > MOTOR_TIMEOUT) {
+  if ((tsInputActive || tdInputActive) && lastTrendCmdMs == 0) {
+    lastTrendCmdMs = agora;
+  }
+  if ((tsInputActive || tdInputActive) && (agora - lastTrendCmdMs) > 50) {
+    lastTrendCmdMs = agora;
+  }
+  if ((estado_trend_sobe || estado_trend_desce) && !tsInputActive && !tdInputActive && lastTrendCmdMs > 0 && (agora - lastTrendCmdMs) > TREND_WATCHDOG_MS) {
+    bool wasUp = estado_trend_sobe;
+    bool wasDown = estado_trend_desce;
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TREND_WD");
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TREND_WD");
+    estado_trend_sobe = false;
     estado_trend_desce = false;
-    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TIMEOUT");
+    trendRemoteActive = false;
     faz_bt_seg = 0;
-    enviarBLE("TD:TIMEOUT");
-    Serial.println("[TIMEOUT] Motor TD desligado por seguranca");
+    mqttStatusDirty = true;
+    enviarBLE("TREND:OFF");
+    Serial.println("[TREND_WD] Timeout. Trend desligado por seguranca");
+    if (wasUp) mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_UP_OFF", false);
+    if (wasDown) mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_DOWN_OFF", false);
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "TREND_OFF", false);
   }
 
   if ((estado_trend_sobe || estado_trend_desce) && ENCODER_TREND >= 0 && trendLastPulseAtMs > 0 && (agora - trendLastPulseAtMs) > 500) {
@@ -3752,14 +4022,16 @@ void loop() {
     return;
   }
   
-  // Verifica se botÃ£o de reset WiFi foi pressionado por 5 segundos
+  #if !OFFLINE_DEMO
   verificaBotaoResetWifi();
+  #endif
   
   // Verifica timeout dos motores (dead man's switch)
   verificaTimeoutMotores();
   
   // Processa comandos Bluetooth do app
   processaComandosBluetooth();
+  #if !OFFLINE_DEMO
   if (mqttCommandQueue) {
     MqttCmdItem item;
     while (xQueueReceive(mqttCommandQueue, &item, 0) == pdTRUE) {
@@ -3770,6 +4042,7 @@ void loop() {
       }
     }
   }
+  #endif
   inputsDebugTick();
   trendTickInputs();
   trendDebugTick();
@@ -3780,15 +4053,15 @@ void loop() {
   // Atualiza horÃ­metro
   atualizaHorimetro();
 
-  // Envia dados ao Supabase periodicamente
+  #if !OFFLINE_DEMO
   atualizaSupabase();
   sendMotorTravelToSupabaseIfNeeded();
-
-  // Verifica status da cadeira periodicamente
   verificacaoPeriodicaStatus();
+  #endif
 
   // FunÃ§Ãµes originais de controle
   contagem_tempo_incoder_virtual();
+  motorTravelAutosaveTick();
   encoderMonTick();
   Watch_Dog();
   buzzerTestTick();
@@ -3797,12 +4070,14 @@ void loop() {
   Button_Seg();
   Button_geral();
   monitora_tempo_rele();
+  #if !OFFLINE_DEMO
   if (mqttStatusDirty && mqttClient.connected() && (millis() - mqttLastStatusPublishMs) > 250) {
     mqttStatusDirty = false;
     mqttLastStatusPublishMs = millis();
     publicaStatusMQTT();
   }
   otaTick();
+  #endif
 
 #if HAS_BLE
   bleAtualizaDisponibilidade();
@@ -3812,7 +4087,7 @@ void loop() {
 // ========== GERAÃ‡ÃƒO DO NÃšMERO DE SÃ‰RIE BASEADO NO MAC ==========
 String geraNumeroSerieDoMAC() {
   uint8_t mac[6];
-  WiFi.macAddress(mac);
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
   
   // Formato: CADEIRA-XXXXXXXXXXXX (12 caracteres hexadecimais do MAC)
   char serial[25];
@@ -3921,6 +4196,88 @@ void resetCalibracao() {
   fim_asento_encoder = 0;
   fim_perneira_encoder = 0;
   Serial.println("[CAL] Dados de calibracao apagados (cal_done, *_max).");
+}
+
+static void clearPrefsNamespace(const char* ns) {
+  Preferences p;
+  if (!p.begin(ns, false)) return;
+  p.clear();
+  p.end();
+}
+
+static void checkBootHoldResetTudo() {
+  const int bootPin = PIN_BOOT_BUTTON;
+  if (bootPin < 0) return;
+  pinMode(bootPin, INPUT_PULLUP);
+  if (digitalRead(bootPin) != LOW) return;
+
+  if (LED >= 0) {
+    pinMode(LED, OUTPUT);
+  }
+
+  Serial.println("[RESET] BOOT pressionado. Segure 5s para RESET_TUDO.");
+  uint32_t pressedAt = millis();
+  uint32_t lastBlinkAt = 0;
+  bool ledOn = false;
+  while (digitalRead(bootPin) == LOW) {
+    uint32_t now = millis();
+    if (LED >= 0 && (now - lastBlinkAt) >= 150) {
+      lastBlinkAt = now;
+      ledOn = !ledOn;
+      digitalWrite(LED, ledOn ? HIGH : LOW);
+    }
+    if ((now - pressedAt) >= 5000) {
+      if (LED >= 0) digitalWrite(LED, HIGH);
+      Serial.println("[RESET] RESET_TUDO acionado por BOOT.");
+      delay(200);
+      resetParaPrimeiraVez();
+      return;
+    }
+    delay(10);
+  }
+  if (LED >= 0) digitalWrite(LED, LOW);
+  Serial.println("[RESET] BOOT solto. Cancelado.");
+}
+
+static void resetParaPrimeiraVez() {
+  Serial.println("[RESET] Apagando dados salvos (NVS)...");
+  delay(100);
+  clearPrefsNamespace("motor_travel");
+  clearPrefsNamespace("cadeira");
+  clearPrefsNamespace("encoder_encosto");
+  clearPrefsNamespace("encoder_asento");
+  clearPrefsNamespace("encoder_pern");
+  clearPrefsNamespace("horimetro");
+  clearPrefsNamespace("mqtt");
+  clearPrefsNamespace("supabase");
+  wifiManager.resetSettings();
+
+  motorTravelPulsesEncosto = 0;
+  motorTravelPulsesAssento = 0;
+  motorTravelPulsesPerneira = 0;
+  motorTravelPulsesTrend = 0;
+  motorTravelUnsavedEncosto = 0;
+  motorTravelUnsavedAssento = 0;
+  motorTravelUnsavedPerneira = 0;
+  motorTravelUnsavedTrend = 0;
+  incoder_virtual_encosto_service = 0;
+  incoder_virtual_asento_service = 0;
+  incoder_virtual_perneira_service = 0;
+  incoder_virtual_encosto_M1 = 0;
+  incoder_virtual_asento_M1 = 0;
+  incoder_virtual_perneira_M1 = 0;
+  fim_encosto_encoder = 0;
+  fim_asento_encoder = 0;
+  fim_perneira_encoder = 0;
+  seatTravelLearned = false;
+  supabaseUserId = "";
+  supabaseMaintenanceRequestSent = false;
+  horimetro = 0.0f;
+  totalMillisMotor = 0;
+
+  Serial.println("[RESET] OK. Reiniciando...");
+  delay(500);
+  ESP.restart();
 }
 
 // ========== BLUETOOTH - PROCESSA COMANDOS DO APP ==========
@@ -4505,6 +4862,81 @@ void executaComandoBluetooth(String cmd, const char* origin) {
   }
 
   if (cmd == "RELAY_STATUS") { relayTrackPrintOnRelays("STATUS"); return; }
+  if (cmd == "RELAY_LIST") {
+    Serial.println("[RELAY] TOKENS: SA DA SE DE SP DP RF TS TD LED BUZZER");
+    Serial.print("[RELAY] SA="); Serial.print(Rele_SA);
+    Serial.print(" DA="); Serial.print(Rele_DA);
+    Serial.print(" SE="); Serial.print(Rele_SE);
+    Serial.print(" DE="); Serial.print(Rele_DE);
+    Serial.print(" SP="); Serial.print(Rele_SP);
+    Serial.print(" DP="); Serial.print(Rele_DP);
+    Serial.print(" RF="); Serial.print(Rele_refletor);
+    Serial.print(" TS="); Serial.print(Rele_TREND_SOBE);
+    Serial.print(" TD="); Serial.print(Rele_TREND_DESCE);
+    Serial.print(" LED="); Serial.print(LED);
+    Serial.print(" BUZZER="); Serial.println(BUZZER);
+    return;
+  }
+  if (cmd == "RELAY_ALL_OFF") {
+    setOutputPin(Rele_SA, false, "RELAY_ALL_OFF");
+    setOutputPin(Rele_DA, false, "RELAY_ALL_OFF");
+    setOutputPin(Rele_SE, false, "RELAY_ALL_OFF");
+    setOutputPin(Rele_DE, false, "RELAY_ALL_OFF");
+    setOutputPin(Rele_SP, false, "RELAY_ALL_OFF");
+    setOutputPin(Rele_DP, false, "RELAY_ALL_OFF");
+    setOutputPin(Rele_refletor, false, "RELAY_ALL_OFF");
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "RELAY_ALL_OFF");
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "RELAY_ALL_OFF");
+    setOutputPin(LED, false, "RELAY_ALL_OFF");
+    setOutputPin(BUZZER, false, "RELAY_ALL_OFF");
+    Serial.println("[RELAY] ALL_OFF");
+    return;
+  }
+  if (cmd.startsWith("RELAY_ON=") || cmd.startsWith("RELAY_ON:") ||
+      cmd.startsWith("RELAY_OFF=") || cmd.startsWith("RELAY_OFF:") ||
+      cmd.startsWith("RELAY_TOGGLE=") || cmd.startsWith("RELAY_TOGGLE:")) {
+    bool doOn = cmd.startsWith("RELAY_ON=");
+    bool doOff = cmd.startsWith("RELAY_OFF=");
+    int sep = cmdRaw.indexOf('=');
+    if (sep < 0) sep = cmdRaw.indexOf(':');
+    String token = cmdRaw.substring(sep + 1);
+    int pin = relayPinByToken(token);
+    if (pin < 0) {
+      Serial.println("[RELAY] INVALID_TOKEN");
+      return;
+    }
+    if ((doOn || doOff) && pin < 0) {
+      Serial.println("[RELAY] NA");
+      return;
+    }
+    bool nextOn = doOn ? true : (doOff ? false : !relayIsOn(pin));
+    setOutputPin(pin, nextOn, "RELAY_CMD");
+    return;
+  }
+  if (cmd.startsWith("RELAY_PULSE=") || cmd.startsWith("RELAY_PULSE:")) {
+    int sep = cmdRaw.indexOf('=');
+    if (sep < 0) sep = cmdRaw.indexOf(':');
+    String args = cmdRaw.substring(sep + 1);
+    args.trim();
+    int comma = args.indexOf(',');
+    String token = (comma < 0) ? args : args.substring(0, comma);
+    uint32_t ms = 500;
+    if (comma >= 0) {
+      String sMs = args.substring(comma + 1);
+      sMs.trim();
+      uint32_t parsed = static_cast<uint32_t>(sMs.toInt());
+      if (parsed > 0) ms = parsed;
+    }
+    int pin = relayPinByToken(token);
+    if (pin < 0) {
+      Serial.println("[RELAY] INVALID_TOKEN");
+      return;
+    }
+    setOutputPin(pin, true, "RELAY_PULSE");
+    delay(ms);
+    setOutputPin(pin, false, "RELAY_PULSE");
+    return;
+  }
 
   if (cmd == "TEST_SA") { ultimoComandoRemoto = millis(); setOutputPin(Rele_SA, true, "TEST"); delay(500); setOutputPin(Rele_SA, false, "TEST"); return; }
   if (cmd == "TEST_DA") { ultimoComandoRemoto = millis(); setOutputPin(Rele_DA, true, "TEST"); delay(500); setOutputPin(Rele_DA, false, "TEST"); return; }
@@ -4519,10 +4951,53 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     Serial.print("[ENC] ENCODER2(GPIO"); Serial.print(ENCODER2); Serial.print(") L="); Serial.println(ENCODER2 >= 0 ? (digitalRead(ENCODER2) == HIGH ? "1" : "0") : "NA");
     Serial.print("[ENC] ENCODER3(GPIO"); Serial.print(ENCODER3); Serial.print(") L="); Serial.println(ENCODER3 >= 0 ? (digitalRead(ENCODER3) == HIGH ? "1" : "0") : "NA");
     Serial.print("[ENC] TREND(GPIO"); Serial.print(ENCODER_TREND); Serial.print(") L="); Serial.println(ENCODER_TREND >= 0 ? (digitalRead(ENCODER_TREND) == HIGH ? "1" : "0") : "NA");
+    Serial.print("[ENC] REQ ENC="); Serial.print(encReqEncosto() ? 1 : 0);
+    Serial.print(" ASS="); Serial.print(encReqAssento() ? 1 : 0);
+    Serial.print(" PER="); Serial.print(encReqPerneira() ? 1 : 0);
+    Serial.print(" TRE="); Serial.println(encReqTrend() ? 1 : 0);
     Serial.print("[ENC] PULSES ENC="); Serial.print(pulses_encosto);
     Serial.print(" ASS="); Serial.print(pulses_assento);
     Serial.print(" PER="); Serial.print(pulses_perneira);
     Serial.print(" TREND="); Serial.println(pulses_trend);
+    return;
+  }
+  if (cmd == "ENC_REQ_STATUS") {
+    Serial.print("[ENC_REQ] ENC="); Serial.print(encReqEncosto() ? 1 : 0);
+    Serial.print(" ASS="); Serial.print(encReqAssento() ? 1 : 0);
+    Serial.print(" PER="); Serial.print(encReqPerneira() ? 1 : 0);
+    Serial.print(" TRE="); Serial.println(encReqTrend() ? 1 : 0);
+    return;
+  }
+  if (cmd.startsWith("ENC_REQ=") || cmd.startsWith("ENC_REQ:")) {
+    int sep = cmdRaw.indexOf('=');
+    if (sep < 0) sep = cmdRaw.indexOf(':');
+    String v = cmdRaw.substring(sep + 1);
+    v.trim();
+    v.toUpperCase();
+    uint8_t m = 0;
+    if (v.length() == 0 || v == "ALL") {
+      m = 0x0F;
+    } else if (v == "NONE") {
+      m = 0;
+    } else {
+      int start = 0;
+      while (start < v.length()) {
+        int comma = v.indexOf(',', start);
+        String token = (comma < 0) ? v.substring(start) : v.substring(start, comma);
+        token.trim();
+        if (token == "ENC" || token == "ENCOSTO") m |= 0x01;
+        else if (token == "ASS" || token == "ASSENTO") m |= 0x02;
+        else if (token == "PER" || token == "PERNEIRA") m |= 0x04;
+        else if (token == "TRE" || token == "TREND") m |= 0x08;
+        if (comma < 0) break;
+        start = comma + 1;
+      }
+    }
+    encRequiredMask = m;
+    Serial.print("[ENC_REQ] SET ENC="); Serial.print(encReqEncosto() ? 1 : 0);
+    Serial.print(" ASS="); Serial.print(encReqAssento() ? 1 : 0);
+    Serial.print(" PER="); Serial.print(encReqPerneira() ? 1 : 0);
+    Serial.print(" TRE="); Serial.println(encReqTrend() ? 1 : 0);
     return;
   }
   if (cmd == "ENC_RESET") {
@@ -4896,7 +5371,9 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("TS:NA");
       return;
     }
-    ultimoComandoTrendSobe = millis();
+    lastTrendCmdMs = millis();
+    ultimoComandoTrendSobe = lastTrendCmdMs;
+    trendRemoteActive = true;
     if (!estado_trend_sobe) {
       estado_trend_sobe = true;
       estado_trend_desce = false;
@@ -4914,7 +5391,9 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("TD:NA");
       return;
     }
-    ultimoComandoTrendDesce = millis();
+    lastTrendCmdMs = millis();
+    ultimoComandoTrendDesce = lastTrendCmdMs;
+    trendRemoteActive = true;
     if (!estado_trend_desce) {
       estado_trend_desce = true;
       estado_trend_sobe = false;
@@ -4926,6 +5405,16 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     } else {
       enviarBLE("TD:KEEP");
     }
+  }
+  else if (cmd == "T0") {
+    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "T0");
+    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "T0");
+    estado_trend_sobe = false;
+    estado_trend_desce = false;
+    trendRemoteActive = false;
+    faz_bt_seg = 0;
+    mqttStatusDirty = true;
+    enviarBLE("T0:OK");
   }
   else if (cmd == "VZ") {
     // PosiÃ§Ã£o ginecolÃ³gica
@@ -5022,6 +5511,9 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     saveMotorTravelPreferences(true);
     supabaseLogUsage("TRAVEL_RESET");
     enviarBLE("TRAVEL:RESET");
+  }
+  else if (cmd == "RESET_TUDO" || cmd == "FACTORY_RESET" || cmd == "RESET_PRIMEIRA_VEZ") {
+    resetParaPrimeiraVez();
   }
   else if (cmd == "TRAVEL_SEND") {
     saveMotorTravelPreferences(true);
@@ -5130,20 +5622,29 @@ void enviaStatusBluetooth() {
   doc["wifiConnected"] = (WiFi.status() == WL_CONNECTED);
   
   // Estados dos relés
-  doc["reflectorOn"] = estado_r;
-  doc["backUpOn"] = estado_se;
-  doc["backDownOn"] = estado_de;
-  doc["seatUpOn"] = estado_sa;
-  doc["seatDownOn"] = estado_da;
-  doc["upperLegsOn"] = estado_sp;
-  doc["lowerLegsOn"] = estado_dp;
-  doc["trendUpOn"] = estado_trend_sobe;
-  doc["trendDownOn"] = estado_trend_desce;
+  doc["reflectorOn"] = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
+  doc["backUpOn"] = (Rele_SE >= 0) ? relayIsOn(Rele_SE) : false;
+  doc["backDownOn"] = (Rele_DE >= 0) ? relayIsOn(Rele_DE) : false;
+  doc["seatUpOn"] = (Rele_SA >= 0) ? relayIsOn(Rele_SA) : false;
+  doc["seatDownOn"] = (Rele_DA >= 0) ? relayIsOn(Rele_DA) : false;
+  doc["upperLegsOn"] = (Rele_SP >= 0) ? relayIsOn(Rele_SP) : false;
+  doc["lowerLegsOn"] = (Rele_DP >= 0) ? relayIsOn(Rele_DP) : false;
+  doc["trendUpOn"] = (Rele_TREND_SOBE >= 0) ? relayIsOn(Rele_TREND_SOBE) : false;
+  doc["trendDownOn"] = (Rele_TREND_DESCE >= 0) ? relayIsOn(Rele_TREND_DESCE) : false;
   
   doc["backPosition"] = incoder_virtual_encosto_service;
   doc["seatPosition"] = incoder_virtual_asento_service;
   doc["legPosition"] = incoder_virtual_perneira_service;
+  doc["encosto_pos"] = incoder_virtual_encosto_service;
+  doc["assento_pos"] = incoder_virtual_asento_service;
+  doc["perneira_pos"] = incoder_virtual_perneira_service;
+  doc["encosto_max"] = fim_encosto_encoder;
+  doc["assento_max"] = fim_asento_encoder;
+  doc["perneira_max"] = fim_perneira_encoder;
   doc["gavetaOpen"] = isGavetaAbertaRaw();
+  doc["gavetaLockIgnored"] = ignoreGavetaLock;
+  doc["isMovingToGineco"] = (cont == 1) || vzInicialEmAndamento;
+  doc["isMovingToParto"] = (cont13 == 1);
   
   if (TREN_INT_DESCE >= 0) doc["trenIntDown"] = (digitalRead(TREN_INT_DESCE) == HIGH);
   if (INT_TREND_DESCE >= 0) doc["trendIntDown"] = (digitalRead(INT_TREND_DESCE) == HIGH);
@@ -5151,16 +5652,131 @@ void enviaStatusBluetooth() {
   if (INT_TREND_SOBE >= 0) doc["trendIntUp"] = (digitalRead(INT_TREND_SOBE) == HIGH);
   
   // Limites
-  doc["seLimit"] = trava_bt_SE;
-  doc["deLimit"] = trava_bt_DE;
-  doc["saLimit"] = trava_bt_SA;
-  doc["daLimit"] = trava_bt_DA;
-  doc["spLimit"] = trava_bt_SP;
-  doc["dpLimit"] = trava_bt_DP;
+  doc["backUpLimit"] = trava_bt_SE;
+  doc["backDownLimit"] = trava_bt_DE;
+  doc["seatUpLimit"] = trava_bt_SA;
+  doc["seatDownLimit"] = trava_bt_DA;
+  doc["legUpLimit"] = trava_bt_SP;
+  doc["legDownLimit"] = trava_bt_DP;
 
   String output;
   serializeJson(doc, output);
   enviarBLE("STATUS:" + output);
+}
+
+static void bleStatusStreamTick() {
+#if HAS_BLE
+  if (!bleClienteConectado || pCharacteristicTX == NULL) {
+    return;
+  }
+
+  uint32_t now = millis();
+  static uint32_t lastSendMs = 0;
+  static int lastBackPos = -1;
+  static int lastSeatPos = -1;
+  static int lastLegPos = -1;
+  static bool lastBackUpOn = false;
+  static bool lastBackDownOn = false;
+  static bool lastSeatUpOn = false;
+  static bool lastSeatDownOn = false;
+  static bool lastLegUpOn = false;
+  static bool lastLegDownOn = false;
+  static bool lastTrendUpOn = false;
+  static bool lastTrendDownOn = false;
+  static bool lastMoving = false;
+
+  bool backUpOn = (Rele_SE >= 0) ? relayIsOn(Rele_SE) : false;
+  bool backDownOn = (Rele_DE >= 0) ? relayIsOn(Rele_DE) : false;
+  bool seatUpOn = (Rele_SA >= 0) ? relayIsOn(Rele_SA) : false;
+  bool seatDownOn = (Rele_DA >= 0) ? relayIsOn(Rele_DA) : false;
+  bool legUpOn = (Rele_SP >= 0) ? relayIsOn(Rele_SP) : false;
+  bool legDownOn = (Rele_DP >= 0) ? relayIsOn(Rele_DP) : false;
+  bool trendUpOn = (Rele_TREND_SOBE >= 0) ? relayIsOn(Rele_TREND_SOBE) : false;
+  bool trendDownOn = (Rele_TREND_DESCE >= 0) ? relayIsOn(Rele_TREND_DESCE) : false;
+
+  bool moving = backUpOn || backDownOn || seatUpOn || seatDownOn || legUpOn || legDownOn || trendUpOn || trendDownOn ||
+                (cont == 1) || (cont13 == 1) || vzInicialEmAndamento || faz_m1;
+
+  uint32_t intervalMs = moving ? 200 : 1000;
+  if ((now - lastSendMs) < intervalMs) {
+    return;
+  }
+
+  int backPos = incoder_virtual_encosto_service;
+  int seatPos = incoder_virtual_asento_service;
+  int legPos = incoder_virtual_perneira_service;
+
+  bool changed = (backPos != lastBackPos) || (seatPos != lastSeatPos) || (legPos != lastLegPos) ||
+                 (backUpOn != lastBackUpOn) || (backDownOn != lastBackDownOn) ||
+                 (seatUpOn != lastSeatUpOn) || (seatDownOn != lastSeatDownOn) ||
+                 (legUpOn != lastLegUpOn) || (legDownOn != lastLegDownOn) ||
+                 (trendUpOn != lastTrendUpOn) || (trendDownOn != lastTrendDownOn) ||
+                 (moving != lastMoving);
+  if (!changed && (now - lastSendMs) < 5000) {
+    return;
+  }
+
+  lastSendMs = now;
+  lastBackPos = backPos;
+  lastSeatPos = seatPos;
+  lastLegPos = legPos;
+  lastBackUpOn = backUpOn;
+  lastBackDownOn = backDownOn;
+  lastSeatUpOn = seatUpOn;
+  lastSeatDownOn = seatDownOn;
+  lastLegUpOn = legUpOn;
+  lastLegDownOn = legDownOn;
+  lastTrendUpOn = trendUpOn;
+  lastTrendDownOn = trendDownOn;
+  lastMoving = moving;
+
+  StaticJsonDocument<512> doc;
+  doc["backPosition"] = backPos;
+  doc["seatPosition"] = seatPos;
+  doc["legPosition"] = legPos;
+  doc["encosto_max"] = fim_encosto_encoder;
+  doc["assento_max"] = fim_asento_encoder;
+  doc["perneira_max"] = fim_perneira_encoder;
+
+  doc["reflectorOn"] = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
+  doc["backUpOn"] = backUpOn;
+  doc["backDownOn"] = backDownOn;
+  doc["seatUpOn"] = seatUpOn;
+  doc["seatDownOn"] = seatDownOn;
+  doc["upperLegsOn"] = legUpOn;
+  doc["lowerLegsOn"] = legDownOn;
+  doc["trendUpOn"] = trendUpOn;
+  doc["trendDownOn"] = trendDownOn;
+
+  doc["gavetaOpen"] = isGavetaAbertaRaw();
+  doc["isMovingToGineco"] = (cont == 1) || vzInicialEmAndamento;
+  doc["isMovingToParto"] = (cont13 == 1);
+
+  doc["backUpLimit"] = trava_bt_SE;
+  doc["backDownLimit"] = trava_bt_DE;
+  doc["seatUpLimit"] = trava_bt_SA;
+  doc["seatDownLimit"] = trava_bt_DA;
+  doc["legUpLimit"] = trava_bt_SP;
+  doc["legDownLimit"] = trava_bt_DP;
+
+  String output;
+  serializeJson(doc, output);
+  if (output.length() > 590) {
+    StaticJsonDocument<256> d2;
+    d2["backPosition"] = backPos;
+    d2["seatPosition"] = seatPos;
+    d2["legPosition"] = legPos;
+    d2["backUpOn"] = backUpOn;
+    d2["backDownOn"] = backDownOn;
+    d2["seatUpOn"] = seatUpOn;
+    d2["seatDownOn"] = seatDownOn;
+    d2["upperLegsOn"] = legUpOn;
+    d2["lowerLegsOn"] = legDownOn;
+    output = "";
+    serializeJson(d2, output);
+  }
+  enviarBLEQuiet("STATUS:" + output);
+#endif
 }
 
 // ========== HORÃMETRO ==========
@@ -5525,7 +6141,25 @@ static void saveMotorTravelPreferences(bool force) {
   motorTravelUnsavedAssento = 0;
   motorTravelUnsavedPerneira = 0;
   motorTravelUnsavedTrend = 0;
-  motorTravelNextSaveMs = now + (15 * 60 * 1000); // 15 minutos
+  motorTravelNextSaveMs = now + 30000;
+}
+
+static void motorTravelAutosaveTick() {
+  uint32_t now = millis();
+  if (motorTravelNextSaveMs != 0 && static_cast<int32_t>(now - motorTravelNextSaveMs) < 0) {
+    return;
+  }
+  bool hasPending = (motorTravelUnsavedEncosto != 0 || motorTravelUnsavedAssento != 0 || motorTravelUnsavedPerneira != 0 || motorTravelUnsavedTrend != 0);
+  if (!hasPending) {
+    return;
+  }
+  bool anyMotorOn = relayIsOn(Rele_SA) || relayIsOn(Rele_DA) || relayIsOn(Rele_SE) || relayIsOn(Rele_DE) || relayIsOn(Rele_SP) || relayIsOn(Rele_DP) ||
+                    (Rele_TREND_SOBE >= 0 && relayIsOn(Rele_TREND_SOBE)) || (Rele_TREND_DESCE >= 0 && relayIsOn(Rele_TREND_DESCE));
+  if (anyMotorOn) {
+    motorTravelNextSaveMs = now + 30000;
+    return;
+  }
+  saveMotorTravelPreferences(true);
 }
 
 static bool supabaseUpsertMotorTravel() {
@@ -5899,6 +6533,7 @@ void carregaPreferencias() {
   preferences.begin("cadeira", false);
   supabaseUserId = preferences.isKey("user_id") ? preferences.getString("user_id", "") : "";
   supabaseMaintenanceRequestSent = preferences.isKey("mnt_sent") ? preferences.getBool("mnt_sent", false) : false;
+  seatTravelLearned = preferences.isKey("ass_travel_done") ? preferences.getBool("ass_travel_done", false) : false;
   preferences.end();
 
   preferences.begin("supabase", false);
@@ -5939,9 +6574,85 @@ void executa_M1_bluetooth() {
   
   Serial.println("Executando Memoria 1 via Bluetooth");
   faz_bt_seg = 1;
+  int targetEnc = incoder_virtual_encosto_M1;
+  int targetAss = incoder_virtual_asento_M1;
+  int targetPer = incoder_virtual_perneira_M1;
+  if (!calibrationInProgress && !ignoreLimitLocks) {
+    int stopEncMax = fim_encosto_encoder;
+    int stopAssMax = fim_asento_encoder;
+    int stopPerMax = fim_perneira_encoder;
+    if (stopEncMax > LIMIT_STOP_MARGIN_PULSES) stopEncMax -= LIMIT_STOP_MARGIN_PULSES;
+    if (stopAssMax > LIMIT_STOP_MARGIN_PULSES) stopAssMax -= LIMIT_STOP_MARGIN_PULSES;
+    if (stopPerMax > LIMIT_STOP_MARGIN_PULSES) stopPerMax -= LIMIT_STOP_MARGIN_PULSES;
+    if (stopEncMax > 0 && targetEnc > stopEncMax) targetEnc = stopEncMax;
+    if (stopAssMax > 0 && targetAss > stopAssMax) targetAss = stopAssMax;
+    if (stopPerMax > 0 && targetPer > stopPerMax) targetPer = stopPerMax;
+  }
+
+  Serial.print("[M1] ATUAL ENC=");
+  Serial.print(incoder_virtual_encosto_service);
+  Serial.print(" ASS=");
+  Serial.print(incoder_virtual_asento_service);
+  Serial.print(" PER=");
+  Serial.println(incoder_virtual_perneira_service);
+  Serial.print("[M1] ALVO  ENC=");
+  Serial.print(incoder_virtual_encosto_M1);
+  Serial.print(" ASS=");
+  Serial.print(incoder_virtual_asento_M1);
+  Serial.print(" PER=");
+  Serial.println(incoder_virtual_perneira_M1);
+  Serial.print("[M1] ALVO_EFETIVO ENC=");
+  Serial.print(targetEnc);
+  Serial.print(" ASS=");
+  Serial.print(targetAss);
+  Serial.print(" PER=");
+  Serial.println(targetPer);
+
+  uint32_t prevPulseEnc = pulses_encosto;
+  uint32_t prevPulseAss = pulses_assento;
+  uint32_t prevPulsePer = pulses_perneira;
+  uint32_t lastPulseEncAt = millis();
+  uint32_t lastPulseAssAt = lastPulseEncAt;
+  uint32_t lastPulsePerAt = lastPulseEncAt;
   
   while (true) {
     Watch_Dog();
+    buzzerTestTick();
+    contagem_tempo_incoder_virtual();
+    monitora_tempo_rele();
+
+    uint32_t now = millis();
+    uint32_t curPe = pulses_encosto;
+    uint32_t curPa = pulses_assento;
+    uint32_t curPp = pulses_perneira;
+    if (curPe != prevPulseEnc) { prevPulseEnc = curPe; lastPulseEncAt = now; }
+    if (curPa != prevPulseAss) { prevPulseAss = curPa; lastPulseAssAt = now; }
+    if (curPp != prevPulsePer) { prevPulsePer = curPp; lastPulsePerAt = now; }
+
+    bool encMotorOn = relayIsOn(Rele_DE) || relayIsOn(Rele_SE);
+    bool assMotorOn = relayIsOn(Rele_SA) || relayIsOn(Rele_DA);
+    bool perMotorOn = relayIsOn(Rele_SP) || relayIsOn(Rele_DP);
+    if (encMotorOn && ENCODER3 >= 0 && (now - lastPulseEncAt) > M1_STALL_TIMEOUT_MS) {
+      Serial.println("[M1] STALL ENCOSTO - sem pulsos");
+      enviarBLE("M1:STALL_ENC");
+      AT_SEG();
+      bipLong();
+      return;
+    }
+    if (assMotorOn && ENCODER1 >= 0 && (now - lastPulseAssAt) > M1_STALL_TIMEOUT_MS) {
+      Serial.println("[M1] STALL ASSENTO - sem pulsos");
+      enviarBLE("M1:STALL_ASS");
+      AT_SEG();
+      bipLong();
+      return;
+    }
+    if (perMotorOn && ENCODER2 >= 0 && (now - lastPulsePerAt) > M1_STALL_TIMEOUT_MS) {
+      Serial.println("[M1] STALL PERNEIRA - sem pulsos");
+      enviarBLE("M1:STALL_PER");
+      AT_SEG();
+      bipLong();
+      return;
+    }
     
     // Verifica parada de emergÃªncia via BLE
     if (comandoBLE.length() > 0) {
@@ -5955,73 +6666,76 @@ void executa_M1_bluetooth() {
       }
     }
     
-    // Movimento do encosto
-    if (incoder_virtual_encosto_service > incoder_virtual_encosto_M1) {
-      setOutputPin(Rele_DE, true, "M1");
-      delay(250);
-      incoder_virtual_encosto_service--;
-      Serial.print("Encosto posicao: ");
-      Serial.println(incoder_virtual_encosto_service);
-    } else {
+    if (ENCODER3 < 0) {
       setOutputPin(Rele_DE, false, "M1");
-      en_DE_acabou = true;
-    }
-
-    if (incoder_virtual_encosto_service < incoder_virtual_encosto_M1) {
-      setOutputPin(Rele_SE, true, "M1");
-      delay(250);
-      incoder_virtual_encosto_service++;
-      Serial.print("Encosto posicao: ");
-      Serial.println(incoder_virtual_encosto_service);
-    } else {
       setOutputPin(Rele_SE, false, "M1");
+      en_DE_acabou = true;
       en_SE_acabou = true;
+    } else {
+      if (incoder_virtual_encosto_service < targetEnc) {
+        setOutputPin(Rele_DE, true, "M1");
+        setOutputPin(Rele_SE, false, "M1");
+        en_DE_acabou = false;
+        en_SE_acabou = false;
+      } else if (incoder_virtual_encosto_service > targetEnc) {
+        setOutputPin(Rele_SE, true, "M1");
+        setOutputPin(Rele_DE, false, "M1");
+        en_DE_acabou = false;
+        en_SE_acabou = false;
+      } else {
+        setOutputPin(Rele_DE, false, "M1");
+        setOutputPin(Rele_SE, false, "M1");
+        en_DE_acabou = true;
+        en_SE_acabou = true;
+      }
     }
 
-    // Movimento do assento
-    if (incoder_virtual_asento_service > incoder_virtual_asento_M1) {
-      setOutputPin(Rele_DA, true, "M1");
-      delay(250);
-      incoder_virtual_asento_service--;
-      Serial.print("Assento posicao: ");
-      Serial.println(incoder_virtual_asento_service);
-    } else {
-      setOutputPin(Rele_DA, false, "M1");
-      en_DA_acabou = true;
-    }
-
-    if (incoder_virtual_asento_service < incoder_virtual_asento_M1) {
-      setOutputPin(Rele_SA, true, "M1");
-      delay(250);
-      incoder_virtual_asento_service++;
-      Serial.print("Assento posicao: ");
-      Serial.println(incoder_virtual_asento_service);
-    } else {
+    if (ENCODER1 < 0) {
       setOutputPin(Rele_SA, false, "M1");
+      setOutputPin(Rele_DA, false, "M1");
       en_SA_acabou = true;
+      en_DA_acabou = true;
+    } else {
+      if (incoder_virtual_asento_service < targetAss) {
+        setOutputPin(Rele_SA, true, "M1");
+        setOutputPin(Rele_DA, false, "M1");
+        en_SA_acabou = false;
+        en_DA_acabou = false;
+      } else if (incoder_virtual_asento_service > targetAss) {
+        setOutputPin(Rele_DA, true, "M1");
+        setOutputPin(Rele_SA, false, "M1");
+        en_SA_acabou = false;
+        en_DA_acabou = false;
+      } else {
+        setOutputPin(Rele_SA, false, "M1");
+        setOutputPin(Rele_DA, false, "M1");
+        en_SA_acabou = true;
+        en_DA_acabou = true;
+      }
     }
 
-    // Movimento da perneira
-    if (incoder_virtual_perneira_service > incoder_virtual_perneira_M1) {
-      setOutputPin(Rele_DP, true, "M1");
-      delay(250);
-      incoder_virtual_perneira_service--;
-      Serial.print("Perneira posicao: ");
-      Serial.println(incoder_virtual_perneira_service);
-    } else {
-      setOutputPin(Rele_DP, false, "M1");
-      en_DP_acabou = true;
-    }
-
-    if (incoder_virtual_perneira_service < incoder_virtual_perneira_M1) {
-      setOutputPin(Rele_SP, true, "M1");
-      delay(250);
-      incoder_virtual_perneira_service++;
-      Serial.print("Perneira posicao: ");
-      Serial.println(incoder_virtual_perneira_service);
-    } else {
+    if (ENCODER2 < 0) {
       setOutputPin(Rele_SP, false, "M1");
+      setOutputPin(Rele_DP, false, "M1");
       en_SP_acabou = true;
+      en_DP_acabou = true;
+    } else {
+      if (incoder_virtual_perneira_service < targetPer) {
+        setOutputPin(Rele_SP, true, "M1");
+        setOutputPin(Rele_DP, false, "M1");
+        en_SP_acabou = false;
+        en_DP_acabou = false;
+      } else if (incoder_virtual_perneira_service > targetPer) {
+        setOutputPin(Rele_DP, true, "M1");
+        setOutputPin(Rele_SP, false, "M1");
+        en_SP_acabou = false;
+        en_DP_acabou = false;
+      } else {
+        setOutputPin(Rele_SP, false, "M1");
+        setOutputPin(Rele_DP, false, "M1");
+        en_SP_acabou = true;
+        en_DP_acabou = true;
+      }
     }
 
     // Verifica se todos os movimentos terminaram
@@ -6041,17 +6755,27 @@ void executa_M1_bluetooth() {
       Serial.println("Memoria 1 concluida");
       return;
     }
+    delay(5);
   }
 }
 
 // ========== FUNÃ‡Ã•ES DO ENCODER VIRTUAL ==========
 void contagem_tempo_incoder_virtual() {
-  bool dir_encosto_up = (digitalRead(Rele_DE) == HIGH);
-  bool dir_encosto_down = (digitalRead(Rele_SE) == HIGH);
-  bool dir_asento_up = (digitalRead(Rele_SA) == HIGH);
-  bool dir_asento_down = (digitalRead(Rele_DA) == HIGH);
-  bool dir_perneira_up = (digitalRead(Rele_SP) == HIGH);
-  bool dir_perneira_down = relayIsOn(Rele_DP);
+  bool dir_encosto_up = (Rele_DE >= 0) ? relayIsOn(Rele_DE) : false;
+  bool dir_encosto_down = (Rele_SE >= 0) ? relayIsOn(Rele_SE) : false;
+  bool dir_asento_up = (Rele_SA >= 0) ? relayIsOn(Rele_SA) : false;
+  bool dir_asento_down = (Rele_DA >= 0) ? relayIsOn(Rele_DA) : false;
+  bool dir_perneira_up = (Rele_SP >= 0) ? relayIsOn(Rele_SP) : false;
+  bool dir_perneira_down = (Rele_DP >= 0) ? relayIsOn(Rele_DP) : false;
+
+  int stopEncMax = fim_encosto_encoder;
+  int stopAssMax = fim_asento_encoder;
+  int stopPerMax = fim_perneira_encoder;
+  if (!calibrationInProgress && !ignoreLimitLocks) {
+    if (stopEncMax > LIMIT_STOP_MARGIN_PULSES) stopEncMax = stopEncMax - LIMIT_STOP_MARGIN_PULSES;
+    if (stopAssMax > LIMIT_STOP_MARGIN_PULSES) stopAssMax = stopAssMax - LIMIT_STOP_MARGIN_PULSES;
+    if (stopPerMax > LIMIT_STOP_MARGIN_PULSES) stopPerMax = stopPerMax - LIMIT_STOP_MARGIN_PULSES;
+  }
 
   uint32_t d_encosto = pulses_encosto - last_pulses_encosto;
   uint32_t d_asento = pulses_assento - last_pulses_assento;
@@ -6133,16 +6857,16 @@ void contagem_tempo_incoder_virtual() {
 
   if (d_encosto) {
     if (dir_encosto_up) {
-      if (calibrationInProgress || incoder_virtual_encosto_service + (int)d_encosto <= fim_encosto_encoder) {
+      if (calibrationInProgress || ignoreLimitLocks || incoder_virtual_encosto_service + (int)d_encosto <= stopEncMax) {
         incoder_virtual_encosto_service += (int)d_encosto;
         trava_bt_SE = false;
       } else {
-        incoder_virtual_encosto_service = fim_encosto_encoder;
+        incoder_virtual_encosto_service = stopEncMax;
         setOutputPin(Rele_DE, false, "LIMIT");
         trava_bt_DE = true;
       }
     } else if (dir_encosto_down) {
-      if (incoder_virtual_encosto_service - (int)d_encosto >= 0) {
+      if (ignoreLimitLocks || incoder_virtual_encosto_service - (int)d_encosto >= 0) {
         incoder_virtual_encosto_service -= (int)d_encosto;
         trava_bt_DE = false;
       } else {
@@ -6155,16 +6879,16 @@ void contagem_tempo_incoder_virtual() {
 
   if (d_asento) {
     if (dir_asento_up) {
-      if (calibrationInProgress || incoder_virtual_asento_service + (int)d_asento <= fim_asento_encoder) {
+      if (calibrationInProgress || ignoreLimitLocks || incoder_virtual_asento_service + (int)d_asento <= stopAssMax) {
         incoder_virtual_asento_service += (int)d_asento;
         trava_bt_DA = false; trava_bt_SA = false;
       } else {
-        incoder_virtual_asento_service = fim_asento_encoder;
+        incoder_virtual_asento_service = stopAssMax;
         setOutputPin(Rele_SA, false, "LIMIT");
         trava_bt_SA = true;
       }
     } else if (dir_asento_down) {
-      if (incoder_virtual_asento_service - (int)d_asento >= 0) {
+      if (ignoreLimitLocks || incoder_virtual_asento_service - (int)d_asento >= 0) {
         incoder_virtual_asento_service -= (int)d_asento;
         trava_bt_SA = false; trava_bt_DA = false;
       } else {
@@ -6177,16 +6901,16 @@ void contagem_tempo_incoder_virtual() {
 
   if (d_perneira) {
     if (dir_perneira_up) {
-      if (calibrationInProgress || incoder_virtual_perneira_service + (int)d_perneira <= fim_perneira_encoder) {
+      if (calibrationInProgress || ignoreLimitLocks || incoder_virtual_perneira_service + (int)d_perneira <= stopPerMax) {
         incoder_virtual_perneira_service += (int)d_perneira;
         trava_bt_DP = false; trava_bt_SP = false;
       } else {
-        incoder_virtual_perneira_service = fim_perneira_encoder;
+        incoder_virtual_perneira_service = stopPerMax;
         setOutputPin(Rele_SP, false, "LIMIT");
         trava_bt_SP = true;
       }
     } else if (dir_perneira_down) {
-      if (incoder_virtual_perneira_service - (int)d_perneira >= 0) {
+      if (ignoreLimitLocks || incoder_virtual_perneira_service - (int)d_perneira >= 0) {
         incoder_virtual_perneira_service -= (int)d_perneira;
         trava_bt_SP = false; trava_bt_DP = false;
       } else {
@@ -6196,6 +6920,8 @@ void contagem_tempo_incoder_virtual() {
       }
     }
   }
+
+  bleStatusStreamTick();
 }
 
 // ========== WATCH DOG (LED heartbeat) ==========
@@ -6331,6 +7057,7 @@ uint32_t rawButtonChangedAt_PT = 0;
 static void inicializaEstadosDeBordaBotoes() {
   uint32_t now = millis();
   lastButtonState_RF = digitalRead(RF);
+  rfIdleLevel = lastButtonState_RF;
   lastButtonState_SP = digitalRead(SP);
   lastButtonState_DP = digitalRead(DP);
   lastButtonState_DE = digitalRead(DE);
@@ -6359,6 +7086,13 @@ static void inicializaEstadosDeBordaBotoes() {
 void Button_geral() {
   if ((millis() - ultimoComandoRemoto) < 1500) return;
   if (faz_bt_seg != 0) return;
+  if (ignoreButtonsUntilRelease) {
+    if (isAnyUserButtonActiveRaw()) {
+      return;
+    }
+    ignoreButtonsUntilRelease = false;
+    inicializaEstadosDeBordaBotoes();
+  }
 
   // Para motores: comportamento "dead-man switch"
   // - Pressionou (LOW): liga e fica ligado enquanto estiver pressionado
@@ -6474,7 +7208,32 @@ void Button_geral() {
   };
 
   if (rfHabilitado) {
-    readToggleButton(RF, lastButtonState_RF, rawButtonState_RF, rawButtonChangedAt_RF, "RF", estado_r, Rele_refletor);
+    uint32_t now = millis();
+    bool currentRaw = digitalRead(RF);
+    if (currentRaw != rawButtonState_RF) {
+      rawButtonState_RF = currentRaw;
+      rawButtonChangedAt_RF = now;
+    }
+    if ((now - rawButtonChangedAt_RF) >= BUTTON_DEBOUNCE_MS) {
+      bool currentState = rawButtonState_RF;
+      if (rfIdleLevel < 0) {
+        rfIdleLevel = currentState ? HIGH : LOW;
+      }
+      bool pressed = (currentState != (rfIdleLevel != 0));
+      bool wasPressed = (lastButtonState_RF != (rfIdleLevel != 0));
+
+      if (pressed && !wasPressed) {
+        Serial.print("[GPIO_INT] Botao RF (Pino "); Serial.print(RF); Serial.println(") = PRESSED");
+        estado_r = !estado_r;
+        setOutputPin(Rele_refletor, estado_r, "RF");
+        Serial.println("Comando RF acionado");
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "RF", false);
+        mqttStatusDirty = true;
+      } else if (!pressed && wasPressed) {
+        Serial.print("[GPIO_INT] Botao RF (Pino "); Serial.print(RF); Serial.println(") = RELEASED");
+      }
+      lastButtonState_RF = currentState;
+    }
   }
   readInputOnly(GAVETA, lastButtonState_GAVETA, rawButtonState_GAVETA, rawButtonChangedAt_GAVETA, "GAVETA");
   bool gavetaAberta = isGavetaAberta();
@@ -6509,6 +7268,8 @@ void Button_geral() {
 
   {
     uint32_t now = millis();
+    static uint32_t m1PressedAtMs = 0;
+    static bool m1Pressed = false;
     bool currRaw = digitalRead(M1);
     if (currRaw != rawButtonState_M1) {
       rawButtonState_M1 = currRaw;
@@ -6518,10 +7279,46 @@ void Button_geral() {
       bool curr = rawButtonState_M1;
       if (curr == LOW && lastButtonState_M1 == HIGH) {
         Serial.print("[GPIO_INT] Botao M1 (Pino "); Serial.print(M1); Serial.println(") = 0 (PRESSIONADO)");
-        Serial.println("Comando M1 acionado");
-        executa_M1();
+        m1PressedAtMs = now;
+        m1Pressed = true;
       } else if (curr == HIGH && lastButtonState_M1 == LOW) {
         Serial.print("[GPIO_INT] Botao M1 (Pino "); Serial.print(M1); Serial.println(") = 1 (SOLTO)");
+        if (m1Pressed) {
+          m1Pressed = false;
+          uint32_t dur = now - m1PressedAtMs;
+          if (dur >= M1_HOLD_SAVE_MS) {
+            incoder_virtual_encosto_M1 = incoder_virtual_encosto_service;
+            incoder_virtual_asento_M1 = incoder_virtual_asento_service;
+            incoder_virtual_perneira_M1 = incoder_virtual_perneira_service;
+
+            preferences.begin("encoder_encosto", false);
+            preferences.putInt("encoder_encosto", incoder_virtual_encosto_M1);
+            preferences.end();
+            
+            preferences.begin("encoder_asento", false);
+            preferences.putInt("encoder_asento", incoder_virtual_asento_M1);
+            preferences.end();
+            
+            preferences.begin("encoder_pern", false);
+            preferences.putInt("encoder_perneira", incoder_virtual_perneira_M1);
+            preferences.end();
+
+            Serial.println("[M1] Posicoes gravadas");
+            Serial.print("[M1] ENC="); Serial.print(incoder_virtual_encosto_M1);
+            Serial.print(" ASS="); Serial.print(incoder_virtual_asento_M1);
+            Serial.print(" PER="); Serial.println(incoder_virtual_perneira_M1);
+            enviarBLE("M1:SAVED");
+            supabaseSaveMemoryPosition(1);
+            bip();
+            delay(200);
+            bip();
+          } else {
+            Serial.println("[M1] Executando memoria");
+            enviarBLE("M1:EXEC");
+            executa_M1_bluetooth();
+            enviarBLE("M1:DONE");
+          }
+        }
       }
       lastButtonState_M1 = curr;
     }
@@ -6559,6 +7356,8 @@ void iniciaCalibracaoSeNecessario() {
   }
 }
 
+static const uint32_t CAL_NO_PULSE_TIMEOUT_MS = 6000;
+
 void executaCalibracao() {
   Serial.println("\n=== CALIBRACAO AUTOMATICA (primeira vez) ===");
   Serial.println("Indo para zero (VZ) por 15 segundos...");
@@ -6585,34 +7384,54 @@ void executaCalibracao() {
   delay(200);
   Serial.println("Subindo todos os eixos ate limite (aprendizado)...");
   unsigned long start = millis();
-  bool doneEnc = false, doneAss = false, donePer = false, doneTrend = false;
+  bool doneEnc = (!encReqEncosto() || ENCODER3 < 0);
+  bool doneAss = (!encReqAssento() || ENCODER1 < 0);
+  bool donePer = (!encReqPerneira() || ENCODER2 < 0);
+  bool doneTrend = (!encReqTrend() || ENCODER_TREND < 0);
   bool errEnc = false, errAss = false, errPer = false, errTrend = false;
   bool sawEnc = false, sawAss = false, sawPer = false, sawTrend = false;
   unsigned long lastChangeEnc = millis(), lastChangeAss = millis(), lastChangePer = millis(), lastChangeTrend = millis();
   unsigned long startEnc = 0, startAss = 0, startPer = 0, startTrend = 0;
   uint32_t startPulseEnc = pulses_encosto, startPulseAss = pulses_assento, startPulsePer = pulses_perneira;
   uint32_t startPulseTrend = pulses_trend;
-  uint32_t prevPulseEnc = startPulseEnc, prevPulseAss = startPulseAss, prevPulsePer = startPulsePer;
-  uint32_t prevPulseTrend = startPulseTrend;
-  startEnc = millis();
-  lastChangeEnc = startEnc;
-  setOutputPin(Rele_DE, true, "CAL");
-  delay(1000);
-  startAss = millis();
-  lastChangeAss = startAss;
-  setOutputPin(Rele_SA, true, "CAL");
-  delay(1000);
-  startPer = millis();
-  lastChangePer = startPer;
-  setOutputPin(Rele_SP, true, "CAL");
-  delay(1000);
-  if (Rele_TREND_SOBE >= 0) {
+  uint32_t prevPulseEnc = pulses_encosto, prevPulseAss = pulses_assento, prevPulsePer = pulses_perneira;
+  uint32_t prevPulseTrend = pulses_trend;
+  
+  if (!doneEnc) {
+    startEnc = millis();
+    lastChangeEnc = startEnc;
+    setOutputPin(Rele_DE, true, "CAL");
+    delay(1000);
+  }
+  
+  if (!doneAss) {
+    startAss = millis();
+    lastChangeAss = startAss;
+    setOutputPin(Rele_SA, true, "CAL");
+    delay(1000);
+  }
+  
+  if (!donePer) {
+    startPer = millis();
+    lastChangePer = startPer;
+    setOutputPin(Rele_SP, true, "CAL");
+    delay(1000);
+  }
+  
+  if (!doneTrend && Rele_TREND_SOBE >= 0) {
     startTrend = millis();
     lastChangeTrend = startTrend;
     setOutputPin(Rele_TREND_SOBE, true, "CAL");
   } else {
     doneTrend = true;
   }
+
+  startEnc = startAss = startPer = startTrend = millis();
+  lastChangeEnc = lastChangeAss = lastChangePer = lastChangeTrend = millis();
+  prevPulseEnc = pulses_encosto;
+  prevPulseAss = pulses_assento;
+  prevPulsePer = pulses_perneira;
+  prevPulseTrend = pulses_trend;
 
   uint32_t maxTrend = 0;
   while (!(doneEnc && doneAss && donePer && doneTrend) && (millis() - start) < 30000) {
@@ -6624,7 +7443,7 @@ void executaCalibracao() {
         sawEnc = true;
         prevPulseEnc = pe;
       }
-      if ((millis() - startEnc > 2000) && !sawEnc) {
+      if ((millis() - startEnc > CAL_NO_PULSE_TIMEOUT_MS) && !sawEnc) {
         setOutputPin(Rele_DE, false, "CAL");
         doneEnc = true;
         errEnc = true;
@@ -6642,7 +7461,7 @@ void executaCalibracao() {
         sawAss = true;
         prevPulseAss = pa;
       }
-      if ((millis() - startAss > 2000) && !sawAss) {
+      if ((millis() - startAss > CAL_NO_PULSE_TIMEOUT_MS) && !sawAss) {
         setOutputPin(Rele_SA, false, "CAL");
         doneAss = true;
         errAss = true;
@@ -6660,7 +7479,7 @@ void executaCalibracao() {
         sawPer = true;
         prevPulsePer = pp;
       }
-      if ((millis() - startPer > 2000) && !sawPer) {
+      if ((millis() - startPer > CAL_NO_PULSE_TIMEOUT_MS) && !sawPer) {
         setOutputPin(Rele_SP, false, "CAL");
         donePer = true;
         errPer = true;
@@ -6679,7 +7498,7 @@ void executaCalibracao() {
         prevPulseTrend = pt;
         maxTrend = pt;
       }
-      if ((millis() - startTrend > 2000) && !sawTrend) {
+      if ((millis() - startTrend > CAL_NO_PULSE_TIMEOUT_MS) && !sawTrend) {
         if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
         doneTrend = true;
         errTrend = true;
@@ -6730,7 +7549,6 @@ void executa_vz() {
   bip();
   buzzerPulseStart2s();
 
-  bool checkEnc = (fim_encosto_encoder == 0 && fim_asento_encoder == 0 && fim_perneira_encoder == 0);
   int startEncPos = incoder_virtual_encosto_service;
   int startAssPos = incoder_virtual_asento_service;
   int startPerPos = incoder_virtual_perneira_service;
@@ -6747,8 +7565,7 @@ void executa_vz() {
   Serial.print(startAssPos);
   Serial.print(" PER=");
   Serial.print(startPerPos);
-  Serial.print(" ENC_CHECK=");
-  Serial.println(checkEnc ? "1" : "0");
+  Serial.println();
 
   setOutputPin(Rele_DA, true, "VZ");
   delay(250);
@@ -6756,8 +7573,19 @@ void executa_vz() {
   delay(250);
   setOutputPin(Rele_DP, true, "VZ");
 
+  startPulseEnc = pulses_encosto;
+  startPulseAss = pulses_assento;
+  startPulsePer = pulses_perneira;
+  startTime = millis();
+
   Serial.println("Executando VZ");
   faz_bt_seg = 1;
+  uint32_t prevAbortMask = userButtonMaskRaw();
+  uint32_t lastAnyPulseAt = millis();
+  bool sawAnyPulse = false;
+  uint32_t prevPe = pulses_encosto;
+  uint32_t prevPa = pulses_assento;
+  uint32_t prevPp = pulses_perneira;
 
   while (cont == 1) {
     Watch_Dog();
@@ -6778,10 +7606,37 @@ void executa_vz() {
         return;
       }
     }
+
+    uint32_t curMask = userButtonMaskRaw();
+    uint32_t newPress = (curMask & ~prevAbortMask);
+    prevAbortMask = curMask;
+    if (newPress != 0) {
+      Serial.println("[VZ] ABORTADO POR BOTAO");
+      AT_SEG();
+      cont = 0;
+      contador2 = 0;
+      buzzerPulseStop();
+      ignoreButtonsUntilRelease = true;
+      return;
+    }
     
     Button_geral();
-    Button_Seg();
     contagem_tempo_incoder_virtual();
+
+    uint32_t pe = pulses_encosto;
+    uint32_t pa = pulses_assento;
+    uint32_t pp = pulses_perneira;
+    if (pe != prevPe || pa != prevPa || pp != prevPp) {
+      sawAnyPulse = true;
+      lastAnyPulseAt = millis();
+      prevPe = pe;
+      prevPa = pa;
+      prevPp = pp;
+    }
+    if (sawAnyPulse && (millis() - lastAnyPulseAt) > VZ_NO_PULSE_FINISH_MS) {
+      Serial.println("[VZ] FIM POR FALTA DE PULSO");
+      cont = 0;
+    }
 
     if (canEarlyFinish &&
         incoder_virtual_encosto_service == 0 &&
@@ -6800,17 +7655,15 @@ void executa_vz() {
   uint32_t dEnc = pulses_encosto - startPulseEnc;
   uint32_t dAss = pulses_assento - startPulseAss;
   uint32_t dPer = pulses_perneira - startPulsePer;
-  if (checkEnc) {
-    Serial.print("[VZ] PULSOS ENC=");
-    Serial.print(dEnc);
-    Serial.print(" ASS=");
-    Serial.print(dAss);
-    Serial.print(" PER=");
-    Serial.println(dPer);
-    if (dEnc == 0) Serial.println("[ERRO ENC] Encosto sem pulso no VZ");
-    if (dAss == 0) Serial.println("[ERRO ENC] Assento sem pulso no VZ");
-    if (dPer == 0) Serial.println("[ERRO ENC] Perneira sem pulso no VZ");
-  }
+  Serial.print("[VZ] PULSOS ENC=");
+  Serial.print(dEnc);
+  Serial.print(" ASS=");
+  Serial.print(dAss);
+  Serial.print(" PER=");
+  Serial.println(dPer);
+  if (encReqEncosto() && ENCODER3 >= 0 && dEnc == 0) Serial.println("[ERRO ENC] Encosto sem pulso no VZ");
+  if (encReqAssento() && ENCODER1 >= 0 && dAss == 0) Serial.println("[ERRO ENC] Assento sem pulso no VZ");
+  if (encReqPerneira() && ENCODER2 >= 0 && dPer == 0) Serial.println("[ERRO ENC] Perneira sem pulso no VZ");
 
   bip();
   buzzerPulseStop();
@@ -6829,15 +7682,10 @@ void executa_vz_ini() {
   Serial.println("  VZ INICIAL - " + NUMERO_SERIE_CADEIRA);
   Serial.println("====================================");
   Serial.println("Executando VZ inicial - Ativando reles sequencialmente");
-  Serial.println("[INFO] Bloqueando loop() durante VZ inicial...");
+  Serial.println("[INFO] VZ inicial em andamento (loop principal suspenso; abort por botoes ativo)...");
   buzzerPulseStart2s();
   vzInicialEmAndamento = true; // Bloqueia loop() completamente
   
-  Serial.println("[INFO] Desabilitando controle de encoder virtual temporariamente...");
-  bool checkEnc = (fim_encosto_encoder == 0 && fim_asento_encoder == 0 && fim_perneira_encoder == 0);
-  habilitaEncoderVirtual = checkEnc;
-  Serial.print("[VZ_INI] ENC_CHECK=");
-  Serial.println(checkEnc ? "1" : "0");
   uint32_t startPulseEnc = pulses_encosto;
   uint32_t startPulseAss = pulses_assento;
   uint32_t startPulsePer = pulses_perneira;
@@ -6845,10 +7693,13 @@ void executa_vz_ini() {
   int startAssPos = incoder_virtual_asento_service;
   int startPerPos = incoder_virtual_perneira_service;
   bool canEarlyFinish = (startEncPos != 0 || startAssPos != 0 || startPerPos != 0);
+  bool doAssento = !seatTravelLearned;
 
-  Serial.println("Ativando Rele_DA...");
-  setOutputPin(Rele_DA, true, "VZ_INI");
-  delay(500);
+  if (doAssento) {
+    Serial.println("Ativando Rele_DA...");
+    setOutputPin(Rele_DA, true, "VZ_INI");
+    delay(500);
+  }
   
   Serial.println("Ativando Rele_SE...");
   setOutputPin(Rele_SE, true, "VZ_INI");
@@ -6857,6 +7708,10 @@ void executa_vz_ini() {
   Serial.println("Ativando Rele_DP...");
   setOutputPin(Rele_DP, true, "VZ_INI");
   delay(500);
+
+  startPulseEnc = pulses_encosto;
+  startPulseAss = pulses_assento;
+  startPulsePer = pulses_perneira;
 
   Serial.print("Aguardando ");
   Serial.print(VZ_MAX_TIME_MS);
@@ -6867,13 +7722,49 @@ void executa_vz_ini() {
   
   unsigned long startTime = millis();
   int lastSecond = 0;
+  uint32_t prevAbortMask = userButtonMaskRaw();
+  uint32_t lastAnyPulseAt = millis();
+  bool sawAnyPulse = false;
+  uint32_t prevPe = pulses_encosto;
+  uint32_t prevPa = pulses_assento;
+  uint32_t prevPp = pulses_perneira;
   while (millis() - startTime < VZ_MAX_TIME_MS) {
     yield();  // Alimenta watchdog continuamente
     Watch_Dog();
     buzzerTestTick();
-    if (checkEnc) {
-      contagem_tempo_incoder_virtual();
+    contagem_tempo_incoder_virtual();
+    uint32_t curMask = userButtonMaskRaw();
+    uint32_t newPress = (curMask & ~prevAbortMask);
+    prevAbortMask = curMask;
+    if (newPress != 0) {
+      Serial.println("[VZ_INI] ABORTADO POR BOTAO");
+      AT_SEG();
+      buzzerPulseStop();
+      vzInicialEmAndamento = false;
+      ignoreButtonsUntilRelease = true;
+      return;
     }
+
+    uint32_t pe = pulses_encosto;
+    uint32_t pp = pulses_perneira;
+    uint32_t pa = pulses_assento;
+    bool changed = (pe != prevPe) || (pp != prevPp) || (doAssento && (pa != prevPa));
+    if (changed) {
+      sawAnyPulse = true;
+      lastAnyPulseAt = millis();
+      prevPe = pe;
+      prevPp = pp;
+      if (doAssento) prevPa = pa;
+    }
+    if (sawAnyPulse && (millis() - lastAnyPulseAt) > VZ_NO_PULSE_FINISH_MS) {
+      Serial.println("[VZ_INI] FIM POR FALTA DE PULSO");
+      break;
+    }
+    if (!sawAnyPulse && (millis() - startTime) > VZ_NO_PULSE_START_ABORT_MS) {
+      Serial.println("[VZ_INI] SEM PULSO - ASSUMINDO LIMITE");
+      break;
+    }
+
     if (canEarlyFinish &&
         incoder_virtual_encosto_service == 0 &&
         incoder_virtual_asento_service == 0 &&
@@ -6898,32 +7789,36 @@ void executa_vz_ini() {
   setOutputPin(Rele_SE, false, "VZ_INI");
   setOutputPin(Rele_DP, false, "VZ_INI");
 
-  if (checkEnc) {
-    uint32_t dEnc = pulses_encosto - startPulseEnc;
-    uint32_t dAss = pulses_assento - startPulseAss;
-    uint32_t dPer = pulses_perneira - startPulsePer;
-    Serial.print("[VZ_INI] PULSOS ENC=");
-    Serial.print(dEnc);
-    Serial.print(" ASS=");
-    Serial.print(dAss);
-    Serial.print(" PER=");
-    Serial.println(dPer);
-    if (dEnc == 0) Serial.println("[ERRO ENC] Encosto sem pulso no VZ_INI");
-    if (dAss == 0) Serial.println("[ERRO ENC] Assento sem pulso no VZ_INI");
-    if (dPer == 0) Serial.println("[ERRO ENC] Perneira sem pulso no VZ_INI");
+  uint32_t dEnc = pulses_encosto - startPulseEnc;
+  uint32_t dAss = pulses_assento - startPulseAss;
+  uint32_t dPer = pulses_perneira - startPulsePer;
+  Serial.print("[VZ_INI] PULSOS ENC=");
+  Serial.print(dEnc);
+  Serial.print(" ASS=");
+  Serial.print(dAss);
+  Serial.print(" PER=");
+  Serial.println(dPer);
+  if (encReqEncosto() && ENCODER3 >= 0 && dEnc == 0) Serial.println("[ERRO ENC] Encosto sem pulso no VZ_INI");
+  if (doAssento && encReqAssento() && ENCODER1 >= 0 && dAss == 0) Serial.println("[ERRO ENC] Assento sem pulso no VZ_INI");
+  if (encReqPerneira() && ENCODER2 >= 0 && dPer == 0) Serial.println("[ERRO ENC] Perneira sem pulso no VZ_INI");
+  if (doAssento && dAss > 0 && !seatTravelLearned) {
+    seatTravelLearned = true;
+    Preferences p;
+    if (p.begin("cadeira", false)) {
+      p.putBool("ass_travel_done", true);
+      p.end();
+    }
+    Serial.println("[OK] Percurso assento gravado com sucesso.");
   }
 
   Serial.println("Fim VZ inicial - Reles desligados");
-  Serial.println("Resetando encoders virtuais...");
+  Serial.println("Resetando contadores de posicao...");
   incoder_virtual_encosto_service = 0;
   incoder_virtual_asento_service = 0;
   incoder_virtual_perneira_service = 0;
-  Serial.println("Encoders resetados.");
+  Serial.println("Contadores resetados.");
   
-  Serial.println("[INFO] Reabilitando controle de encoder virtual.");
-  habilitaEncoderVirtual = true; // Reabilita encoder apÃ³s VZ inicial
-  
-  Serial.println("[INFO] Desbloqueando loop() - VZ inicial completo.");
+  Serial.println("[INFO] VZ inicial completo (loop principal retomado).");
   vzInicialEmAndamento = false; // Libera loop() para executar normalmente
   buzzerPulseStop();
 }
@@ -6942,6 +7837,17 @@ void executa_pt() {
 
   Serial.println("Executando PT");
   faz_bt_seg = 1;
+  uint32_t prevAbortMask = userButtonMaskRaw();
+  uint32_t startTime = millis();
+  uint32_t prevPe = pulses_encosto;
+  uint32_t prevPa = pulses_assento;
+  uint32_t prevPp = pulses_perneira;
+  uint32_t lastChangeEnc = startTime;
+  uint32_t lastChangeAss = startTime;
+  uint32_t lastChangePer = startTime;
+  bool sawEnc = false, sawAss = false, sawPer = false;
+  bool doneEnc = false, doneAss = false, donePer = false;
+  bool sawAnyPulse = false;
 
   while (cont13 == 1) {
     Watch_Dog();
@@ -6962,27 +7868,80 @@ void executa_pt() {
         return;
       }
     }
-    
-    Button_geral();
-    Button_Seg();
-    contagem_tempo_incoder_virtual();
-    contador++;
 
-    // Proteção contra overflow (15 segundos = 15000ms)
-    if (contador >= 15000 || contador < 0) {
-      setOutputPin(Rele_SA, false, "PT");
-      setOutputPin(Rele_DE, false, "PT");
-      setOutputPin(Rele_SP, false, "PT");
+    uint32_t curMask = userButtonMaskRaw();
+    uint32_t newPress = (curMask & ~prevAbortMask);
+    prevAbortMask = curMask;
+    if (newPress != 0) {
+      Serial.println("[PT] ABORTADO POR BOTAO");
+      AT_SEG();
       cont13 = 0;
       contador = 0;
-
-      bip();
       buzzerPulseStop();
-      faz_bt_seg = 0;
-      Serial.println("Fim PT");
-      enviarBLE("PT:DONE");
+      ignoreButtonsUntilRelease = true;
+      return;
+    }
+    
+    Button_geral();
+    contagem_tempo_incoder_virtual();
+    uint32_t now = millis();
+
+    uint32_t pe = pulses_encosto;
+    uint32_t pa = pulses_assento;
+    uint32_t pp = pulses_perneira;
+
+    if (pe != prevPe) {
+      prevPe = pe;
+      lastChangeEnc = now;
+      sawEnc = true;
+      sawAnyPulse = true;
+    }
+    if (pa != prevPa) {
+      prevPa = pa;
+      lastChangeAss = now;
+      sawAss = true;
+      sawAnyPulse = true;
+    }
+    if (pp != prevPp) {
+      prevPp = pp;
+      lastChangePer = now;
+      sawPer = true;
+      sawAnyPulse = true;
+    }
+
+    if (!doneEnc && sawEnc && (now - lastChangeEnc) > VZ_NO_PULSE_FINISH_MS) {
+      doneEnc = true;
+      setOutputPin(Rele_DE, false, "PT");
+    }
+    if (!doneAss && sawAss && (now - lastChangeAss) > VZ_NO_PULSE_FINISH_MS) {
+      doneAss = true;
+      setOutputPin(Rele_SA, false, "PT");
+    }
+    if (!donePer && sawPer && (now - lastChangePer) > VZ_NO_PULSE_FINISH_MS) {
+      donePer = true;
+      setOutputPin(Rele_SP, false, "PT");
+    }
+
+    if (!sawAnyPulse && (now - startTime) > VZ_NO_PULSE_START_ABORT_MS) {
+      Serial.println("[PT] SEM PULSO - ASSUMINDO LIMITE");
+      cont13 = 0;
+    } else if (doneEnc && doneAss && donePer) {
+      cont13 = 0;
+    } else if ((now - startTime) > VZ_MAX_TIME_MS) {
+      cont13 = 0;
     }
   }
+
+  setOutputPin(Rele_SA, false, "PT");
+  setOutputPin(Rele_DE, false, "PT");
+  setOutputPin(Rele_SP, false, "PT");
+  cont13 = 0;
+
+  bip();
+  buzzerPulseStop();
+  faz_bt_seg = 0;
+  Serial.println("Fim PT");
+  enviarBLE("PT:DONE");
 }
 
 // ========== EXECUÃ‡ÃƒO DA MEMÃ“RIA M1 (via botÃ£o fÃ­sico) ==========
@@ -7054,6 +8013,8 @@ void executa_M1() {
   // Se segurou o botÃ£o, executa o movimento para a posiÃ§Ã£o salva
   while (faz_m1 == true) {
     Watch_Dog();
+    buzzerTestTick();
+    contagem_tempo_incoder_virtual();
 
     faz_bt_seg = 1;
     Button_Seg();
@@ -7066,73 +8027,76 @@ void executa_M1() {
       return;
     }
 
-    // Movimento do Encosto
-    if (incoder_virtual_encosto_service > incoder_virtual_encosto_M1) {
-      setOutputPin(Rele_DE, true, "M1");
-      delay(250);
-      incoder_virtual_encosto_service--;
-      Serial.print("Posicao encoder virtual encosto = ");
-      Serial.println(incoder_virtual_encosto_service);
-    } else {
+    if (ENCODER3 < 0) {
       setOutputPin(Rele_DE, false, "M1");
-      en_DE_acabou = true;
-    }
-
-    if (incoder_virtual_encosto_service < incoder_virtual_encosto_M1) {
-      setOutputPin(Rele_SE, true, "M1");
-      delay(250);
-      incoder_virtual_encosto_service++;
-      Serial.print("Posicao encoder virtual encosto = ");
-      Serial.println(incoder_virtual_encosto_service);
-    } else {
       setOutputPin(Rele_SE, false, "M1");
+      en_DE_acabou = true;
       en_SE_acabou = true;
+    } else {
+      if (incoder_virtual_encosto_service < incoder_virtual_encosto_M1) {
+        setOutputPin(Rele_DE, true, "M1");
+        setOutputPin(Rele_SE, false, "M1");
+        en_DE_acabou = false;
+        en_SE_acabou = false;
+      } else if (incoder_virtual_encosto_service > incoder_virtual_encosto_M1) {
+        setOutputPin(Rele_SE, true, "M1");
+        setOutputPin(Rele_DE, false, "M1");
+        en_DE_acabou = false;
+        en_SE_acabou = false;
+      } else {
+        setOutputPin(Rele_DE, false, "M1");
+        setOutputPin(Rele_SE, false, "M1");
+        en_DE_acabou = true;
+        en_SE_acabou = true;
+      }
     }
 
-    // Movimento do Assento
-    if (incoder_virtual_asento_service > incoder_virtual_asento_M1) {
-      setOutputPin(Rele_DA, true, "M1");
-      delay(250);
-      incoder_virtual_asento_service--;
-      Serial.print("Posicao encoder virtual assento = ");
-      Serial.println(incoder_virtual_asento_service);
-    } else {
-      setOutputPin(Rele_DA, false, "M1");
-      en_DA_acabou = true;
-    }
-
-    if (incoder_virtual_asento_service < incoder_virtual_asento_M1) {
-      setOutputPin(Rele_SA, true, "M1");
-      delay(250);
-      incoder_virtual_asento_service++;
-      Serial.print("Posicao encoder virtual assento = ");
-      Serial.println(incoder_virtual_asento_service);
-    } else {
+    if (ENCODER1 < 0) {
       setOutputPin(Rele_SA, false, "M1");
+      setOutputPin(Rele_DA, false, "M1");
       en_SA_acabou = true;
+      en_DA_acabou = true;
+    } else {
+      if (incoder_virtual_asento_service < incoder_virtual_asento_M1) {
+        setOutputPin(Rele_SA, true, "M1");
+        setOutputPin(Rele_DA, false, "M1");
+        en_SA_acabou = false;
+        en_DA_acabou = false;
+      } else if (incoder_virtual_asento_service > incoder_virtual_asento_M1) {
+        setOutputPin(Rele_DA, true, "M1");
+        setOutputPin(Rele_SA, false, "M1");
+        en_SA_acabou = false;
+        en_DA_acabou = false;
+      } else {
+        setOutputPin(Rele_SA, false, "M1");
+        setOutputPin(Rele_DA, false, "M1");
+        en_SA_acabou = true;
+        en_DA_acabou = true;
+      }
     }
 
-    // Movimento da Perneira
-    if (incoder_virtual_perneira_service > incoder_virtual_perneira_M1) {
-      setOutputPin(Rele_DP, true, "M1");
-      delay(250);
-      incoder_virtual_perneira_service--;
-      Serial.print("Posicao encoder virtual perneira = ");
-      Serial.println(incoder_virtual_perneira_service);
-    } else {
-      setOutputPin(Rele_DP, false, "M1");
-      en_DP_acabou = true;
-    }
-
-    if (incoder_virtual_perneira_service < incoder_virtual_perneira_M1) {
-      setOutputPin(Rele_SP, true, "M1");
-      delay(250);
-      incoder_virtual_perneira_service++;
-      Serial.print("Posicao encoder virtual perneira = ");
-      Serial.println(incoder_virtual_perneira_service);
-    } else {
+    if (ENCODER2 < 0) {
       setOutputPin(Rele_SP, false, "M1");
+      setOutputPin(Rele_DP, false, "M1");
       en_SP_acabou = true;
+      en_DP_acabou = true;
+    } else {
+      if (incoder_virtual_perneira_service < incoder_virtual_perneira_M1) {
+        setOutputPin(Rele_SP, true, "M1");
+        setOutputPin(Rele_DP, false, "M1");
+        en_SP_acabou = false;
+        en_DP_acabou = false;
+      } else if (incoder_virtual_perneira_service > incoder_virtual_perneira_M1) {
+        setOutputPin(Rele_DP, true, "M1");
+        setOutputPin(Rele_SP, false, "M1");
+        en_SP_acabou = false;
+        en_DP_acabou = false;
+      } else {
+        setOutputPin(Rele_SP, false, "M1");
+        setOutputPin(Rele_DP, false, "M1");
+        en_SP_acabou = true;
+        en_DP_acabou = true;
+      }
     }
 
     // Verifica se todos os movimentos terminaram
@@ -7153,6 +8117,7 @@ void executa_M1() {
       enviarBLE("M1:DONE");
       return;
     }
+    delay(5);
   }
 }
 
@@ -7178,6 +8143,8 @@ void AT_SEG() {
   estado_dp = false;
   estado_trend_sobe = false;
   estado_trend_desce = false;
+  trendRemoteActive = false;
+  lastTrendCmdMs = 0;
 
   faz_bt_seg = 0;
   cont = 0;

@@ -29,6 +29,7 @@
 #include <freertos/queue.h>
 #include <esp_idf_version.h>
 #include <esp_task_wdt.h>
+#include "driver/gpio.h"
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(ARDUINO_ESP32S2_DEV) || defined(ARDUINO_ESP32S2)
 #define HAS_BLE 0
@@ -1860,6 +1861,20 @@ static void IRAM_ATTR isr_encoder1() { pulses_assento++; }
 static void IRAM_ATTR isr_encoder2() { pulses_perneira++; }
 static void IRAM_ATTR isr_encoder3() { pulses_encosto++; }
 
+static bool gpioIsrServiceReady = false;
+static void IRAM_ATTR isr_encoder2_idf(void *arg) {
+  (void)arg;
+  pulses_perneira++;
+}
+
+static inline void ensureGpioIsrService() {
+  if (gpioIsrServiceReady) return;
+  esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+  if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
+    gpioIsrServiceReady = true;
+  }
+}
+
 // Debounce para comandos BLE
 unsigned long ultimoComandoBLE = 0;
 String ultimoCmdBLE = "";
@@ -2025,6 +2040,7 @@ void setup() {
     Serial.println("[GAVETA] DESABILITADO");
   }
   pinMode(ENCODER1, INPUT_PULLUP);
+  if (ENCODER2 >= 0) gpio_reset_pin(static_cast<gpio_num_t>(ENCODER2));
   pinMode(ENCODER2, INPUT_PULLUP);
   pinMode(ENCODER3, INPUT_PULLUP);
   if (TEST_MODE) {
@@ -2036,7 +2052,16 @@ void setup() {
       Serial.println("[ENC] ENCODER1 desabilitado");
     }
     if (ENCODER2 >= 0 && ENCODER2 != I2C_SDA && ENCODER2 != I2C_SCL && ENCODER2 != Rele_refletor) {
-      attachInterrupt(digitalPinToInterrupt(ENCODER2), isr_encoder2, FALLING);
+      if (ENCODER2 >= 39) {
+        ensureGpioIsrService();
+        gpio_set_direction(static_cast<gpio_num_t>(ENCODER2), GPIO_MODE_INPUT);
+        gpio_set_pull_mode(static_cast<gpio_num_t>(ENCODER2), GPIO_PULLUP_ONLY);
+        gpio_set_intr_type(static_cast<gpio_num_t>(ENCODER2), GPIO_INTR_NEGEDGE);
+        gpio_isr_handler_add(static_cast<gpio_num_t>(ENCODER2), isr_encoder2_idf, nullptr);
+        gpio_intr_enable(static_cast<gpio_num_t>(ENCODER2));
+      } else {
+        attachInterrupt(digitalPinToInterrupt(ENCODER2), isr_encoder2, FALLING);
+      }
     } else {
       Serial.println("[ENC] ENCODER2 desabilitado");
     }

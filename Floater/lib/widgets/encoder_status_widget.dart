@@ -65,7 +65,7 @@ class EncoderStatusWidget extends StatelessWidget {
             _buildPositionIndicator(
               label: 'Encosto',
               position: chairState.backPosition,
-              maxPosition: 50,
+              maxPosition: chairState.backMax > 0 ? chairState.backMax : 50,
               upLimit: chairState.backUpLimit,
               downLimit: chairState.backDownLimit,
               color: Colors.blue,
@@ -75,7 +75,7 @@ class EncoderStatusWidget extends StatelessWidget {
             _buildPositionIndicator(
               label: 'Assento',
               position: chairState.seatPosition,
-              maxPosition: 50,
+              maxPosition: chairState.seatMax > 0 ? chairState.seatMax : 50,
               upLimit: chairState.seatUpLimit,
               downLimit: chairState.seatDownLimit,
               color: Colors.green,
@@ -85,7 +85,7 @@ class EncoderStatusWidget extends StatelessWidget {
             _buildPositionIndicator(
               label: 'Perneira',
               position: chairState.legPosition,
-              maxPosition: 50,
+              maxPosition: chairState.legMax > 0 ? chairState.legMax : 50,
               upLimit: chairState.legUpLimit,
               downLimit: chairState.legDownLimit,
               color: Colors.orange,
@@ -212,7 +212,10 @@ class EncoderStatusWidget extends StatelessWidget {
 
             // Progress
             FractionallySizedBox(
-              widthFactor: position / maxPosition,
+              widthFactor: maxPosition <= 0
+                  ? 0
+                  : ((position < 0 ? 0 : (position > maxPosition ? maxPosition : position)) /
+                      maxPosition),
               child: Container(
                 height: 8,
                 decoration: BoxDecoration(
