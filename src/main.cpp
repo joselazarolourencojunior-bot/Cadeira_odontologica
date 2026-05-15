@@ -3413,6 +3413,7 @@ void setup() {
     Serial.println("[ENC] TEST_MODE=1: interrupcoes de encoder desabilitadas");
   } else {
     if (ENCODER1 >= 0 && ENCODER1 != I2C_SDA && ENCODER1 != I2C_SCL && ENCODER1 != Rele_refletor) {
+      pinMode(ENCODER1, INPUT_PULLUP);
       attachInterrupt(digitalPinToInterrupt(ENCODER1), isr_encoder1, CHANGE);
     } else {
       Serial.println("[ENC] ENCODER1 desabilitado");
@@ -3426,17 +3427,20 @@ void setup() {
         gpio_isr_handler_add(static_cast<gpio_num_t>(ENCODER2), isr_encoder2_idf, nullptr);
         gpio_intr_enable(static_cast<gpio_num_t>(ENCODER2));
       } else {
+        pinMode(ENCODER2, INPUT_PULLUP);
         attachInterrupt(digitalPinToInterrupt(ENCODER2), isr_encoder2, CHANGE);
       }
     } else {
       Serial.println("[ENC] ENCODER2 desabilitado");
     }
     if (ENCODER3 >= 0 && ENCODER3 != I2C_SDA && ENCODER3 != I2C_SCL && ENCODER3 != Rele_refletor) {
+      pinMode(ENCODER3, INPUT_PULLUP);
       attachInterrupt(digitalPinToInterrupt(ENCODER3), isr_encoder3, CHANGE);
     } else {
       Serial.println("[ENC] ENCODER3 desabilitado");
     }
     if (ENCODER_TREND >= 0 && ENCODER_TREND != I2C_SDA && ENCODER_TREND != I2C_SCL && ENCODER_TREND != Rele_refletor) {
+      pinMode(ENCODER_TREND, INPUT_PULLUP);
       attachInterrupt(digitalPinToInterrupt(ENCODER_TREND), isr_encoder_trend, CHANGE);
     } else {
       Serial.println("[ENC] ENCODER_TREND desabilitado");
