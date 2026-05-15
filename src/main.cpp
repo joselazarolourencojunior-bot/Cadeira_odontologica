@@ -2967,6 +2967,10 @@ bool estado_trend_sobe = 0;
 bool estado_trend_desce = 0;
 bool faz_bt_seg = 0;
 
+static bool reflectorMoveActive = false;
+static bool reflectorWasOnAtMoveStart = false;
+static uint8_t reflectorMoveKind = 0;
+
 volatile uint32_t pulses_encosto = 0;
 volatile uint32_t pulses_assento = 0;
 volatile uint32_t pulses_perneira = 0;
@@ -3144,6 +3148,23 @@ const uint32_t VZ_NO_PULSE_START_ABORT_MS = 2000;
 const uint32_t M1_HOLD_SAVE_MS = 3000;
 const int LIMIT_STOP_MARGIN_PULSES = 30;
 const uint32_t M1_STALL_TIMEOUT_MS = 1200;
+
+static int perneiraMaxOutForLocks() {
+  int m = fim_perneira_encoder;
+  if (!calibrationInProgress && !ignoreLimitLocks) {
+    if (m > LIMIT_STOP_MARGIN_PULSES) m -= LIMIT_STOP_MARGIN_PULSES;
+  }
+  if (m < 0) m = 0;
+  return m;
+}
+
+static bool perneiraIsAtPt() {
+  int m = perneiraMaxOutForLocks();
+  if (m <= 0) {
+    return true;
+  }
+  return incoder_virtual_perneira_service >= m;
+}
 
 // Flags para controle de fim de curso do encoder
 bool en_SA_acabou = false;
@@ -3987,6 +4008,95 @@ void verificaTimeoutMotores() {
   }
 }
 
+static void reflectorAutoTick() {
+  uint8_t kindNow = 1;
+  if (cont == 1 || vzInicialEmAndamento) {
+    kindNow = 3;
+  } else if (cont13 == 1) {
+    kindNow = 2;
+  }
+
+  bool moving =
+      (Rele_SE >= 0 && relayIsOn(Rele_SE)) ||
+      (Rele_DE >= 0 && relayIsOn(Rele_DE)) ||
+      (Rele_SA >= 0 && relayIsOn(Rele_SA)) ||
+      (Rele_DA >= 0 && relayIsOn(Rele_DA)) ||
+      (Rele_SP >= 0 && relayIsOn(Rele_SP)) ||
+      (Rele_DP >= 0 && relayIsOn(Rele_DP)) ||
+      (Rele_TREND_SOBE >= 0 && relayIsOn(Rele_TREND_SOBE)) ||
+      (Rele_TREND_DESCE >= 0 && relayIsOn(Rele_TREND_DESCE));
+
+  if (!reflectorMoveActive && moving) {
+    reflectorMoveActive = true;
+    reflectorWasOnAtMoveStart = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
+    reflectorMoveKind = kindNow;
+  }
+
+  if (reflectorMoveActive && moving) {
+    if (kindNow == 3) {
+      reflectorMoveKind = 3;
+    } else if (kindNow == 2 && reflectorMoveKind != 3) {
+      reflectorMoveKind = 2;
+    }
+    if (Rele_refletor >= 0 && relayIsOn(Rele_refletor)) {
+      setOutputPin(Rele_refletor, false, "REF_MOVE");
+      estado_r = false;
+      enviarBLE("RF:AUTO_OFF");
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "RF_AUTO_OFF", false);
+    }
+    return;
+  }
+
+  if (reflectorMoveActive && !moving) {
+    reflectorMoveActive = false;
+    if (reflectorMoveKind == 2) {
+      if (Rele_refletor >= 0) {
+        setOutputPin(Rele_refletor, true, "REF_PT");
+        estado_r = true;
+        enviarBLE("RF:PT_ON");
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "RF_PT_ON", false);
+      }
+    } else if (reflectorMoveKind == 3) {
+      if (Rele_refletor >= 0) {
+        setOutputPin(Rele_refletor, false, "REF_VZ");
+        estado_r = false;
+        enviarBLE("RF:VZ_OFF");
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "RF_VZ_OFF", false);
+      }
+    } else if (reflectorWasOnAtMoveStart) {
+      if (Rele_refletor >= 0) {
+        setOutputPin(Rele_refletor, true, "REF_RESTORE");
+        estado_r = true;
+        enviarBLE("RF:RESTORE_ON");
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "RF_RESTORE_ON", false);
+      }
+    }
+    reflectorMoveKind = 0;
+    reflectorWasOnAtMoveStart = false;
+  }
+}
+
+static void reflectorPreMove(uint8_t kind, const char* src) {
+  if (!reflectorMoveActive) {
+    reflectorMoveActive = true;
+    reflectorWasOnAtMoveStart = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
+    reflectorMoveKind = kind;
+  } else {
+    if (kind == 3) {
+      reflectorMoveKind = 3;
+    } else if (kind == 2 && reflectorMoveKind != 3) {
+      reflectorMoveKind = 2;
+    }
+  }
+
+  if (Rele_refletor >= 0 && relayIsOn(Rele_refletor)) {
+    setOutputPin(Rele_refletor, false, src ? src : "REF_PRE");
+    estado_r = false;
+    enviarBLE("RF:AUTO_OFF");
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "RF_AUTO_OFF", false);
+  }
+}
+
 // ========== LOOP PRINCIPAL ==========
 void loop() {
   if (powerFailDetected) {
@@ -4013,11 +4123,13 @@ void loop() {
   contagem_tempo_incoder_virtual();
   encoderMonTick();
 #endif
+  reflectorAutoTick();
   delay(10);
   return;
 #endif
   // Se VZ inicial estiver em andamento, nÃ£o executa nada do loop
   if (vzInicialEmAndamento) {
+    reflectorAutoTick();
     delay(100);
     return;
   }
@@ -4046,6 +4158,7 @@ void loop() {
   inputsDebugTick();
   trendTickInputs();
   trendDebugTick();
+  reflectorAutoTick();
 
   // Monitoramento do sistema (Debug)
   monitoraSistema();
@@ -5223,6 +5336,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     if (ignoreLimitLocks || !trava_bt_SE) {
       ultimoComandoSE = millis();
       if (!estado_se) {
+        reflectorPreMove(1, "SE");
         estado_se = true;
         setOutputPin(Rele_SE, true, "SE");
         faz_bt_seg = 1;
@@ -5244,6 +5358,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     if (ignoreLimitLocks || !trava_bt_DE) {
       ultimoComandoDE = millis();
       if (!estado_de) {
+        reflectorPreMove(1, "DE");
         estado_de = true;
         setOutputPin(Rele_DE, true, "DE");
         faz_bt_seg = 1;
@@ -5265,6 +5380,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     if (ignoreLimitLocks || !trava_bt_SA) {
       ultimoComandoSA = millis();
       if (!estado_sa) {
+        reflectorPreMove(1, "SA");
         estado_sa = true;
         setOutputPin(Rele_SA, true, "SA");
         faz_bt_seg = 1;
@@ -5286,6 +5402,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     if (ignoreLimitLocks || !trava_bt_DA) {
       ultimoComandoDA = millis();
       if (!estado_da) {
+        reflectorPreMove(1, "DA");
         estado_da = true;
         setOutputPin(Rele_DA, true, "DA");
         faz_bt_seg = 1;
@@ -5318,6 +5435,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     if (ignoreLimitLocks || !trava_bt_SP) {
       ultimoComandoSP = millis();
       if (!estado_sp) {
+        reflectorPreMove(1, "SP");
         estado_sp = true;
         setOutputPin(Rele_SP, true, "SP");
         faz_bt_seg = 1;
@@ -5350,6 +5468,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     if (ignoreLimitLocks || !trava_bt_DP) {
       ultimoComandoDP = millis();
       if (!estado_dp) {
+        reflectorPreMove(1, "DP");
         estado_dp = true;
         setOutputPin(Rele_DP, true, "DP");
         faz_bt_seg = 1;
@@ -5375,6 +5494,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     ultimoComandoTrendSobe = lastTrendCmdMs;
     trendRemoteActive = true;
     if (!estado_trend_sobe) {
+      reflectorPreMove(1, "TS");
       estado_trend_sobe = true;
       estado_trend_desce = false;
       if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TS");
@@ -5395,6 +5515,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     ultimoComandoTrendDesce = lastTrendCmdMs;
     trendRemoteActive = true;
     if (!estado_trend_desce) {
+      reflectorPreMove(1, "TD");
       estado_trend_desce = true;
       estado_trend_sobe = false;
       if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TD");
@@ -5429,6 +5550,68 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     cont13 = 1;
     executa_pt();
     enviarBLE("PT:DONE");
+  }
+  else if (cmd == "M1:GET") {
+    String pos = String("M1:POS:") +
+                 String(incoder_virtual_encosto_M1) + "," +
+                 String(incoder_virtual_asento_M1) + "," +
+                 String(incoder_virtual_perneira_M1);
+    enviarBLE(pos);
+    if (origin && String(origin) == "MQTT") {
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", pos, false);
+    }
+  }
+  else if (cmd.startsWith("M1:SET:") || cmd.startsWith("M1:SET=")) {
+    int start = cmd.indexOf(':', 3);
+    if (start >= 0) {
+      start++;
+    } else {
+      start = cmd.indexOf('=');
+      if (start >= 0) start++;
+    }
+    if (start < 0 || start >= cmd.length()) {
+      enviarBLE("M1:SET:ERR");
+      return;
+    }
+    String payload = cmd.substring(start);
+    int c1 = payload.indexOf(',');
+    int c2 = (c1 >= 0) ? payload.indexOf(',', c1 + 1) : -1;
+    if (c1 < 0 || c2 < 0) {
+      enviarBLE("M1:SET:ERR");
+      return;
+    }
+    int back = payload.substring(0, c1).toInt();
+    int seat = payload.substring(c1 + 1, c2).toInt();
+    int leg = payload.substring(c2 + 1).toInt();
+
+    incoder_virtual_encosto_M1 = back;
+    incoder_virtual_asento_M1 = seat;
+    incoder_virtual_perneira_M1 = leg;
+
+    preferences.begin("encoder_encosto", false);
+    preferences.putInt("encoder_encosto", incoder_virtual_encosto_M1);
+    preferences.end();
+
+    preferences.begin("encoder_asento", false);
+    preferences.putInt("encoder_asento", incoder_virtual_asento_M1);
+    preferences.end();
+
+    preferences.begin("encoder_pern", false);
+    preferences.putInt("encoder_perneira", incoder_virtual_perneira_M1);
+    preferences.end();
+
+    mqttStatusDirty = true;
+    enviarBLE("M1:SET:OK");
+
+    String pos = String("M1:POS:") +
+                 String(incoder_virtual_encosto_M1) + "," +
+                 String(incoder_virtual_asento_M1) + "," +
+                 String(incoder_virtual_perneira_M1);
+    enviarBLE(pos);
+    if (origin && String(origin) == "MQTT") {
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "M1:SET:OK", false);
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", pos, false);
+    }
   }
   else if (cmd == "M1") {
     // PosiÃ§Ã£o de memÃ³ria 1
@@ -5638,9 +5821,20 @@ void enviaStatusBluetooth() {
   doc["encosto_pos"] = incoder_virtual_encosto_service;
   doc["assento_pos"] = incoder_virtual_asento_service;
   doc["perneira_pos"] = incoder_virtual_perneira_service;
-  doc["encosto_max"] = fim_encosto_encoder;
-  doc["assento_max"] = fim_asento_encoder;
-  doc["perneira_max"] = fim_perneira_encoder;
+  int encMaxOut = fim_encosto_encoder;
+  int assMaxOut = fim_asento_encoder;
+  int perMaxOut = fim_perneira_encoder;
+  if (!calibrationInProgress && !ignoreLimitLocks) {
+    if (encMaxOut > LIMIT_STOP_MARGIN_PULSES) encMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+    if (assMaxOut > LIMIT_STOP_MARGIN_PULSES) assMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+    if (perMaxOut > LIMIT_STOP_MARGIN_PULSES) perMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+  }
+  if (encMaxOut < 0) encMaxOut = 0;
+  if (assMaxOut < 0) assMaxOut = 0;
+  if (perMaxOut < 0) perMaxOut = 0;
+  doc["encosto_max"] = encMaxOut;
+  doc["assento_max"] = assMaxOut;
+  doc["perneira_max"] = perMaxOut;
   doc["gavetaOpen"] = isGavetaAbertaRaw();
   doc["gavetaLockIgnored"] = ignoreGavetaLock;
   doc["isMovingToGineco"] = (cont == 1) || vzInicialEmAndamento;
@@ -5705,6 +5899,17 @@ static void bleStatusStreamTick() {
   int backPos = incoder_virtual_encosto_service;
   int seatPos = incoder_virtual_asento_service;
   int legPos = incoder_virtual_perneira_service;
+  int encMaxOut = fim_encosto_encoder;
+  int assMaxOut = fim_asento_encoder;
+  int perMaxOut = fim_perneira_encoder;
+  if (!calibrationInProgress && !ignoreLimitLocks) {
+    if (encMaxOut > LIMIT_STOP_MARGIN_PULSES) encMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+    if (assMaxOut > LIMIT_STOP_MARGIN_PULSES) assMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+    if (perMaxOut > LIMIT_STOP_MARGIN_PULSES) perMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+  }
+  if (encMaxOut < 0) encMaxOut = 0;
+  if (assMaxOut < 0) assMaxOut = 0;
+  if (perMaxOut < 0) perMaxOut = 0;
 
   bool changed = (backPos != lastBackPos) || (seatPos != lastSeatPos) || (legPos != lastLegPos) ||
                  (backUpOn != lastBackUpOn) || (backDownOn != lastBackDownOn) ||
@@ -5734,9 +5939,9 @@ static void bleStatusStreamTick() {
   doc["backPosition"] = backPos;
   doc["seatPosition"] = seatPos;
   doc["legPosition"] = legPos;
-  doc["encosto_max"] = fim_encosto_encoder;
-  doc["assento_max"] = fim_asento_encoder;
-  doc["perneira_max"] = fim_perneira_encoder;
+  doc["encosto_max"] = encMaxOut;
+  doc["assento_max"] = assMaxOut;
+  doc["perneira_max"] = perMaxOut;
 
   doc["reflectorOn"] = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
   doc["backUpOn"] = backUpOn;
@@ -5766,6 +5971,9 @@ static void bleStatusStreamTick() {
     d2["backPosition"] = backPos;
     d2["seatPosition"] = seatPos;
     d2["legPosition"] = legPos;
+    d2["encosto_max"] = encMaxOut;
+    d2["assento_max"] = assMaxOut;
+    d2["perneira_max"] = perMaxOut;
     d2["backUpOn"] = backUpOn;
     d2["backDownOn"] = backDownOn;
     d2["seatUpOn"] = seatUpOn;
@@ -6608,6 +6816,8 @@ void executa_M1_bluetooth() {
   Serial.print(" PER=");
   Serial.println(targetPer);
 
+  reflectorPreMove(2, "M1");
+
   uint32_t prevPulseEnc = pulses_encosto;
   uint32_t prevPulseAss = pulses_assento;
   uint32_t prevPulsePer = pulses_perneira;
@@ -6619,6 +6829,7 @@ void executa_M1_bluetooth() {
     Watch_Dog();
     buzzerTestTick();
     contagem_tempo_incoder_virtual();
+    reflectorAutoTick();
     monitora_tempo_rele();
 
     uint32_t now = millis();
@@ -6753,6 +6964,7 @@ void executa_M1_bluetooth() {
       bip();
       
       Serial.println("Memoria 1 concluida");
+      reflectorAutoTick();
       return;
     }
     delay(5);
@@ -7191,18 +7403,8 @@ void Button_geral() {
     bool currentState = rawState;
     if (currentState == LOW && stableState == HIGH) {
       Serial.print("[GPIO_INT] Botao "); Serial.print(msg); Serial.print(" (Pino "); Serial.print(pin); Serial.println(") = 0 (PRESSIONADO)");
-      if (String(msg) == "GAVETA") {
-        enviarBLE("GAVETA:OPEN");
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_OPEN", false);
-        mqttStatusDirty = true;
-      }
     } else if (currentState == HIGH && stableState == LOW) {
       Serial.print("[GPIO_INT] Botao "); Serial.print(msg); Serial.print(" (Pino "); Serial.print(pin); Serial.println(") = 1 (SOLTO)");
-      if (String(msg) == "GAVETA") {
-        enviarBLE("GAVETA:CLOSED");
-        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_CLOSED", false);
-        mqttStatusDirty = true;
-      }
     }
     stableState = currentState;
   };
@@ -7237,6 +7439,25 @@ void Button_geral() {
   }
   readInputOnly(GAVETA, lastButtonState_GAVETA, rawButtonState_GAVETA, rawButtonChangedAt_GAVETA, "GAVETA");
   bool gavetaAberta = isGavetaAberta();
+  {
+    static bool lastGavetaAberta = false;
+    if (gavetaAberta != lastGavetaAberta) {
+      lastGavetaAberta = gavetaAberta;
+      if (gavetaAberta) {
+        enviarBLE("GAVETA:OPEN");
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_OPEN", false);
+        if (!perneiraIsAtPt()) {
+          enviarBLE("GAVETA:NOT_ALLOWED");
+          mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_NOT_ALLOWED", false);
+          AT_SEG();
+        }
+      } else {
+        enviarBLE("GAVETA:CLOSED");
+        mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_CLOSED", false);
+      }
+      mqttStatusDirty = true;
+    }
+  }
   readMotorButton(SP, lastButtonState_SP, rawButtonState_SP, rawButtonChangedAt_SP, "SP", estado_sp, Rele_SP, (!ignoreLimitLocks && trava_bt_SP) || gavetaAberta, gavetaAberta ? "gaveta" : "limite", ultimoComandoSP);
   readMotorButton(DP, lastButtonState_DP, rawButtonState_DP, rawButtonChangedAt_DP, "DP", estado_dp, Rele_DP, (!ignoreLimitLocks && trava_bt_DP) || gavetaAberta, gavetaAberta ? "gaveta" : "limite", ultimoComandoDP);
   readMotorButton(DE, lastButtonState_DE, rawButtonState_DE, rawButtonChangedAt_DE, "DE", estado_de, Rele_DE, !ignoreLimitLocks && trava_bt_DE, "limite", ultimoComandoDE);
@@ -7533,6 +7754,8 @@ void executaCalibracao() {
     fim_encosto_encoder = incoder_virtual_encosto_service;
     fim_asento_encoder = incoder_virtual_asento_service;
     fim_perneira_encoder = incoder_virtual_perneira_service;
+    ignoreLimitLocks = false;
+    ignoreGavetaLock = false;
     trava_bt_DE = true;
     trava_bt_SA = true;
     trava_bt_SP = true;
@@ -7540,6 +7763,22 @@ void executaCalibracao() {
     trava_bt_DA = false;
     trava_bt_DP = false;
     Serial.println("[OK] Calibracao concluida e salva.");
+
+    int encMaxOut = fim_encosto_encoder;
+    int assMaxOut = fim_asento_encoder;
+    int perMaxOut = fim_perneira_encoder;
+    if (encMaxOut > LIMIT_STOP_MARGIN_PULSES) encMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+    if (assMaxOut > LIMIT_STOP_MARGIN_PULSES) assMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+    if (perMaxOut > LIMIT_STOP_MARGIN_PULSES) perMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+    if (encMaxOut < 0) encMaxOut = 0;
+    if (assMaxOut < 0) assMaxOut = 0;
+    if (perMaxOut < 0) perMaxOut = 0;
+
+    String limitsMsg = String("ENC_LIMITS:MIN:0,0,0:MAX:") +
+                       String(encMaxOut) + "," + String(assMaxOut) + "," + String(perMaxOut);
+    enviarBLE(limitsMsg);
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", limitsMsg, false);
+    mqttStatusDirty = true;
   }
 }
 
@@ -7548,6 +7787,21 @@ void executa_vz() {
   Serial.println("VZ acionado");
   bip();
   buzzerPulseStart2s();
+
+  if (isGavetaAberta()) {
+    Serial.println("[GAVETA] Aberta - bloqueando VZ (perneira nao pode baixar)");
+    enviarBLE("GAVETA:OPEN");
+    enviarBLE("VZ:GAVETA");
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_OPEN", false);
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "VZ:GAVETA", false);
+    mqttStatusDirty = true;
+    cont = 0;
+    buzzerPulseStop();
+    AT_SEG();
+    return;
+  }
+
+  reflectorPreMove(3, "VZ");
 
   int startEncPos = incoder_virtual_encosto_service;
   int startAssPos = incoder_virtual_asento_service;
@@ -7622,6 +7876,7 @@ void executa_vz() {
     
     Button_geral();
     contagem_tempo_incoder_virtual();
+    reflectorAutoTick();
 
     uint32_t pe = pulses_encosto;
     uint32_t pa = pulses_assento;
@@ -7651,6 +7906,7 @@ void executa_vz() {
   setOutputPin(Rele_DA, false, "VZ");
   setOutputPin(Rele_SE, false, "VZ");
   setOutputPin(Rele_DP, false, "VZ");
+  reflectorAutoTick();
 
   uint32_t dEnc = pulses_encosto - startPulseEnc;
   uint32_t dAss = pulses_assento - startPulseAss;
@@ -7684,7 +7940,21 @@ void executa_vz_ini() {
   Serial.println("Executando VZ inicial - Ativando reles sequencialmente");
   Serial.println("[INFO] VZ inicial em andamento (loop principal suspenso; abort por botoes ativo)...");
   buzzerPulseStart2s();
+  if (isGavetaAberta()) {
+    Serial.println("[GAVETA] Aberta - bloqueando VZ_INI (perneira nao pode baixar)");
+    enviarBLE("GAVETA:OPEN");
+    enviarBLE("VZ_INI:GAVETA");
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "GAVETA_OPEN", false);
+    mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", "VZ_INI:GAVETA", false);
+    mqttStatusDirty = true;
+    buzzerPulseStop();
+    AT_SEG();
+    return;
+  }
+
   vzInicialEmAndamento = true; // Bloqueia loop() completamente
+
+  reflectorPreMove(3, "VZ_INI");
   
   uint32_t startPulseEnc = pulses_encosto;
   uint32_t startPulseAss = pulses_assento;
@@ -7733,6 +8003,7 @@ void executa_vz_ini() {
     Watch_Dog();
     buzzerTestTick();
     contagem_tempo_incoder_virtual();
+    reflectorAutoTick();
     uint32_t curMask = userButtonMaskRaw();
     uint32_t newPress = (curMask & ~prevAbortMask);
     prevAbortMask = curMask;
@@ -7829,6 +8100,8 @@ void executa_pt() {
   bip();
   buzzerPulseStart2s();
 
+  reflectorPreMove(2, "PT");
+
   setOutputPin(Rele_SA, true, "PT");
   delay(250);
   setOutputPin(Rele_DE, true, "PT");
@@ -7884,6 +8157,7 @@ void executa_pt() {
     
     Button_geral();
     contagem_tempo_incoder_virtual();
+    reflectorAutoTick();
     uint32_t now = millis();
 
     uint32_t pe = pulses_encosto;
@@ -7936,6 +8210,7 @@ void executa_pt() {
   setOutputPin(Rele_DE, false, "PT");
   setOutputPin(Rele_SP, false, "PT");
   cont13 = 0;
+  reflectorAutoTick();
 
   bip();
   buzzerPulseStop();
@@ -7963,6 +8238,7 @@ void executa_M1() {
       bip();
       delay(200);
       cont12 = 0;
+      reflectorPreMove(2, "M1");
 
       Serial.println("Executando Memoria 1");
       Serial.print("Posicao do encosto = ");
@@ -8015,6 +8291,7 @@ void executa_M1() {
     Watch_Dog();
     buzzerTestTick();
     contagem_tempo_incoder_virtual();
+    reflectorAutoTick();
 
     faz_bt_seg = 1;
     Button_Seg();
