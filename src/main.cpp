@@ -809,6 +809,9 @@ static BLEAdvertising* bleAdvertising = NULL;
 static bool bleAdvertisingAtivo = false;
 static bool blePendingHelloSync = false;
 static uint32_t blePendingHelloSyncAtMs = 0;
+static uint32_t blePendingHelloSyncLastSendMs = 0;
+static uint8_t blePendingHelloSyncTries = 0;
+static bool bleSawRxSinceConnect = false;
 
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -2196,6 +2199,9 @@ class MyServerCallbacks: public BLEServerCallbacks {
     bleAdvertisingAtivo = false;
     blePendingHelloSync = true;
     blePendingHelloSyncAtMs = millis();
+    blePendingHelloSyncLastSendMs = 0;
+    blePendingHelloSyncTries = 0;
+    bleSawRxSinceConnect = false;
     beepSeqStart(4, 100, 120);
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO CONECTADO!");
@@ -2208,6 +2214,9 @@ class MyServerCallbacks: public BLEServerCallbacks {
   void onDisconnect(BLEServer* pServer) {
     bleClienteConectado = false;
     blePendingHelloSync = false;
+    blePendingHelloSyncLastSendMs = 0;
+    blePendingHelloSyncTries = 0;
+    bleSawRxSinceConnect = false;
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO DESCONECTADO");
     Serial.println("====================================");
@@ -2237,6 +2246,7 @@ class MyCallbacks: public BLECharacteristicCallbacks {
     std::string rxValue = pCharacteristic->getValue();
     
     if (rxValue.length() > 0) {
+      bleSawRxSinceConnect = true;
       comandoBLE = "";
       for (int i = 0; i < rxValue.length(); i++) {
         comandoBLE += rxValue[i];
@@ -5636,6 +5646,42 @@ void executaComandoBluetooth(String cmd, const char* origin) {
     enviaStatusBluetooth();
     bleSendAllSnapshotExtras();
   }
+  else if (cmd == "ENC_SNAPSHOT" || cmd == "ENC_INFO") {
+    int encMaxOut = fim_encosto_encoder;
+    int assMaxOut = fim_asento_encoder;
+    int perMaxOut = fim_perneira_encoder;
+    if (!calibrationInProgress && !ignoreLimitLocks) {
+      if (encMaxOut > LIMIT_STOP_MARGIN_PULSES) encMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+      if (assMaxOut > LIMIT_STOP_MARGIN_PULSES) assMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+      if (perMaxOut > LIMIT_STOP_MARGIN_PULSES) perMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+    }
+    if (encMaxOut < 0) encMaxOut = 0;
+    if (assMaxOut < 0) assMaxOut = 0;
+    if (perMaxOut < 0) perMaxOut = 0;
+
+    String msg = String("ENC_SNAPSHOT:POS:") +
+                 String(incoder_virtual_encosto_service) + "," +
+                 String(incoder_virtual_asento_service) + "," +
+                 String(incoder_virtual_perneira_service) +
+                 ":MIN:0,0,0:MAX:" +
+                 String(encMaxOut) + "," + String(assMaxOut) + "," + String(perMaxOut) +
+                 ":PULSE:" +
+                 String(static_cast<uint32_t>(pulses_encosto)) + "," +
+                 String(static_cast<uint32_t>(pulses_assento)) + "," +
+                 String(static_cast<uint32_t>(pulses_perneira)) +
+                 ":M1:" +
+                 String(incoder_virtual_encosto_M1) + "," +
+                 String(incoder_virtual_asento_M1) + "," +
+                 String(incoder_virtual_perneira_M1);
+
+    Serial.println(msg);
+    if (bleClienteConectado) {
+      enviarBLE(msg);
+    }
+    if (origin && String(origin) == "MQTT") {
+      mqttEnqueuePublish(MQTT_TOPIC_BASE + "tx_cmd", msg, false);
+    }
+  }
   else if (cmd == "HORIMETRO") {
     // Retorna horÃ­metro
     enviarBLE("HORIMETRO:" + String(horimetro, 2));
@@ -5901,10 +5947,20 @@ static void bleStatusStreamTick() {
   }
 
   uint32_t now = millis();
-  if (blePendingHelloSync && (now - blePendingHelloSyncAtMs) > 1500) {
-    blePendingHelloSync = false;
-    enviaStatusBluetooth();
-    bleSendAllSnapshotExtras();
+  if (blePendingHelloSync) {
+    bool ready = bleSawRxSinceConnect || ((now - blePendingHelloSyncAtMs) > 1500);
+    if (ready) {
+      bool canSend = (blePendingHelloSyncLastSendMs == 0) || ((now - blePendingHelloSyncLastSendMs) > 1000);
+      if (canSend) {
+        enviaStatusBluetooth();
+        bleSendAllSnapshotExtras();
+        blePendingHelloSyncLastSendMs = now;
+        blePendingHelloSyncTries++;
+        if (bleSawRxSinceConnect || blePendingHelloSyncTries >= 5) {
+          blePendingHelloSync = false;
+        }
+      }
+    }
   }
   static uint32_t lastSendMs = 0;
   static int lastBackPos = -1;
@@ -6358,7 +6414,13 @@ static void saveMotorTravelPreferences(bool force) {
                      incoder_virtual_perneira_service != last_v_per);
 
   if (!force) {
-    return; // Não salva automaticamente por tempo, apenas quando forçado (ex: queda de energia)
+    if (motorTravelNextSaveMs != 0 && static_cast<int32_t>(now - motorTravelNextSaveMs) < 0) {
+      return;
+    }
+    bool hasPending = (motorTravelUnsavedEncosto != 0 || motorTravelUnsavedAssento != 0 || motorTravelUnsavedPerneira != 0 || motorTravelUnsavedTrend != 0);
+    if (!hasPending && !posChanged) {
+      return;
+    }
   }
 
   Preferences p;
