@@ -817,6 +817,8 @@ static uint32_t blePendingHelloSyncAtMs = 0;
 static uint32_t blePendingHelloSyncLastSendMs = 0;
 static uint8_t blePendingHelloSyncTries = 0;
 static bool bleSawRxSinceConnect = false;
+static uint32_t bleTxSuspendUntilMs = 0;
+static int bleTxLastErrRc = 0;
 
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -2263,6 +2265,16 @@ class MyCallbacks: public BLECharacteristicCallbacks {
     }
   }
 };
+
+class MyTxCallbacks: public BLECharacteristicCallbacks {
+  void onStatus(BLECharacteristic* pCharacteristic, Status s, uint32_t code) {
+    (void)pCharacteristic;
+    if (s == BLECharacteristicCallbacks::Status::ERROR_GATT) {
+      bleTxLastErrRc = (int)code;
+      bleTxSuspendUntilMs = millis() + 2000;
+    }
+  }
+};
 #endif
 
 #if HAS_BLE
@@ -2295,6 +2307,7 @@ static void bleAtualizaDisponibilidade() {
       BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_WRITE_NR
     );
     pCharacteristicTX->addDescriptor(new BLE2902());
+    pCharacteristicTX->setCallbacks(new MyTxCallbacks());
 
     pCharacteristicRX = pService->createCharacteristic(
       CHARACTERISTIC_UUID_RX,
@@ -2329,7 +2342,20 @@ static void bleAtualizaDisponibilidade() {
 
 void enviarBLE(String msg) {
 #if HAS_BLE
-  if (bleClienteConectado && pCharacteristicTX != NULL) {
+  if (!bleClienteConectado || pCharacteristicTX == NULL) {
+    return;
+  }
+  uint32_t now = millis();
+  if (bleTxSuspendUntilMs != 0 && static_cast<int32_t>(now - bleTxSuspendUntilMs) < 0) {
+    return;
+  }
+  if (pServer != NULL && pServer->getConnectedCount() == 0) {
+    return;
+  }
+  if (msg.length() > 595) {
+    msg = msg.substring(0, 595);
+  }
+  {
     pCharacteristicTX->setValue(msg.c_str());
     pCharacteristicTX->notify();
     Serial.print("[BLE] Enviado: ");
@@ -2342,7 +2368,20 @@ void enviarBLE(String msg) {
 
 static void enviarBLEQuiet(String msg) {
 #if HAS_BLE
-  if (bleClienteConectado && pCharacteristicTX != NULL) {
+  if (!bleClienteConectado || pCharacteristicTX == NULL) {
+    return;
+  }
+  uint32_t now = millis();
+  if (bleTxSuspendUntilMs != 0 && static_cast<int32_t>(now - bleTxSuspendUntilMs) < 0) {
+    return;
+  }
+  if (pServer != NULL && pServer->getConnectedCount() == 0) {
+    return;
+  }
+  if (msg.length() > 595) {
+    msg = msg.substring(0, 595);
+  }
+  {
     pCharacteristicTX->setValue(msg.c_str());
     pCharacteristicTX->notify();
   }
@@ -6068,7 +6107,7 @@ static void bleStatusStreamTick() {
   bool moving = backUpOn || backDownOn || seatUpOn || seatDownOn || legUpOn || legDownOn || trendUpOn || trendDownOn ||
                 (cont == 1) || (cont13 == 1) || vzInicialEmAndamento || faz_m1;
 
-  uint32_t intervalMs = moving ? 200 : 1000;
+  uint32_t intervalMs = moving ? 400 : 1200;
   if ((now - lastSendMs) < intervalMs) {
     return;
   }
