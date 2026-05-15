@@ -767,7 +767,11 @@ static bool mqttConnectEnabled = false;
 static bool mqttPostConnectPending = false;
 static bool mqttSubscribed = false;
 static uint32_t mqttPostConnectUntilMs = 0;
+#if OFFLINE_DEMO
+static bool audibleErrorBeeps = false;
+#else
 static bool audibleErrorBeeps = true;
+#endif
 static uint32_t bootStartedAtMs = 0;
 static uint32_t wifiOkAtMs = 0;
 static uint32_t wifiLostAtMs = 0;
@@ -791,6 +795,7 @@ static uint32_t buzzerTestOffAtMs = 0;
 static bool trendDebugEnabled = false;
 static uint32_t trendDebugNextMs = 0;
 static uint32_t trendDebugIntervalMs = 500;
+static bool buzzerForceOnce = false;
 
 // Número de série único baseado no MAC ID do ESP32
 String NUMERO_SERIE_CADEIRA = "";
@@ -905,6 +910,7 @@ void executa_pt();
 void AT_SEG();
 void bip();
 void bipLong();
+void bipForce();
 void enviarBLE(String msg);
 void verificaBotaoResetWifi();
 void resetaConfiguracoesWifi();
@@ -7971,7 +7977,7 @@ void executaCalibracao() {
 // ========== EXECUÃ‡ÃƒO DA POSIÃ‡ÃƒO GINECOLÃ“GICA (VZ) ==========
 void executa_vz() {
   Serial.println("VZ acionado");
-  bip();
+  bipForce();
   buzzerPulseStart2s();
 
   if (isGavetaAberta()) {
@@ -8120,7 +8126,7 @@ void executa_vz() {
   if (encReqAssento() && ENCODER1 >= 0 && dAss == 0) Serial.println("[ERRO ENC] Assento sem pulso no VZ");
   if (encReqPerneira() && ENCODER2 >= 0 && dPer == 0) Serial.println("[ERRO ENC] Perneira sem pulso no VZ");
 
-  bip();
+  bipForce();
   buzzerPulseStop();
   faz_bt_seg = 0;
   Serial.println("Fim VZ");
@@ -8304,7 +8310,7 @@ void executa_vz_ini() {
 // ========== EXECUÃ‡ÃƒO DA POSIÃ‡ÃƒO DE PARTO (PT) ==========
 void executa_pt() {
   Serial.println("PT acionado");
-  bip();
+  bipForce();
   buzzerPulseStart2s();
 
   bool encAtMax = false;
@@ -8438,7 +8444,7 @@ void executa_pt() {
   cont13 = 0;
   reflectorAutoTick();
 
-  bip();
+  bipForce();
   buzzerPulseStop();
   faz_bt_seg = 0;
   Serial.println("Fim PT");
@@ -8656,15 +8662,27 @@ void AT_SEG() {
 
 // ========== BIP (buzzer) ==========
 void bip() {
+#if OFFLINE_DEMO
+  if (!buzzerForceOnce) return;
+#endif
+  buzzerForceOnce = false;
   digitalWrite(BUZZER, HIGH);
   delay(100);
   digitalWrite(BUZZER, LOW);
 }
 
 void bipLong() {
+#if OFFLINE_DEMO
+  return;
+#endif
   digitalWrite(BUZZER, HIGH);
   delay(400);
   digitalWrite(BUZZER, LOW);
+}
+
+void bipForce() {
+  buzzerForceOnce = true;
+  bip();
 }
 
 // ========== MONITORAMENTO DO SISTEMA (DEBUG) ==========
