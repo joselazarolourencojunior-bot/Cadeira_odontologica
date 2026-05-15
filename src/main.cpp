@@ -807,6 +807,8 @@ bool bleClienteConectado = false;
 static bool bleInicializado = false;
 static BLEAdvertising* bleAdvertising = NULL;
 static bool bleAdvertisingAtivo = false;
+static bool blePendingHelloSync = false;
+static uint32_t blePendingHelloSyncAtMs = 0;
 
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -867,6 +869,7 @@ String geraNumeroSerieDoMAC();
 void processaComandosBluetooth();
 void executaComandoBluetooth(String cmd, const char* origin);
 void enviaStatusBluetooth();
+static void bleSendAllSnapshotExtras();
 static void bleStatusStreamTick();
 void iniciaTimerMotor();
 void paraTimerMotor();
@@ -2191,6 +2194,8 @@ class MyServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     bleClienteConectado = true;
     bleAdvertisingAtivo = false;
+    blePendingHelloSync = true;
+    blePendingHelloSyncAtMs = millis();
     beepSeqStart(4, 100, 120);
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO CONECTADO!");
@@ -2202,6 +2207,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
   void onDisconnect(BLEServer* pServer) {
     bleClienteConectado = false;
+    blePendingHelloSync = false;
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO DESCONECTADO");
     Serial.println("====================================");
@@ -5628,6 +5634,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
   else if (cmd == "STATUS") {
     // Retorna status completo
     enviaStatusBluetooth();
+    bleSendAllSnapshotExtras();
   }
   else if (cmd == "HORIMETRO") {
     // Retorna horÃ­metro
@@ -5858,6 +5865,35 @@ void enviaStatusBluetooth() {
   enviarBLE("STATUS:" + output);
 }
 
+static void bleSendAllSnapshotExtras() {
+#if HAS_BLE
+  if (!bleClienteConectado || pCharacteristicTX == NULL) {
+    return;
+  }
+  String m1pos = String("M1:POS:") +
+                 String(incoder_virtual_encosto_M1) + "," +
+                 String(incoder_virtual_asento_M1) + "," +
+                 String(incoder_virtual_perneira_M1);
+  enviarBLE(m1pos);
+
+  int encMaxOut = fim_encosto_encoder;
+  int assMaxOut = fim_asento_encoder;
+  int perMaxOut = fim_perneira_encoder;
+  if (!calibrationInProgress && !ignoreLimitLocks) {
+    if (encMaxOut > LIMIT_STOP_MARGIN_PULSES) encMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+    if (assMaxOut > LIMIT_STOP_MARGIN_PULSES) assMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+    if (perMaxOut > LIMIT_STOP_MARGIN_PULSES) perMaxOut -= LIMIT_STOP_MARGIN_PULSES;
+  }
+  if (encMaxOut < 0) encMaxOut = 0;
+  if (assMaxOut < 0) assMaxOut = 0;
+  if (perMaxOut < 0) perMaxOut = 0;
+
+  String limitsMsg = String("ENC_LIMITS:MIN:0,0,0:MAX:") +
+                     String(encMaxOut) + "," + String(assMaxOut) + "," + String(perMaxOut);
+  enviarBLE(limitsMsg);
+#endif
+}
+
 static void bleStatusStreamTick() {
 #if HAS_BLE
   if (!bleClienteConectado || pCharacteristicTX == NULL) {
@@ -5865,6 +5901,11 @@ static void bleStatusStreamTick() {
   }
 
   uint32_t now = millis();
+  if (blePendingHelloSync && (now - blePendingHelloSyncAtMs) > 1500) {
+    blePendingHelloSync = false;
+    enviaStatusBluetooth();
+    bleSendAllSnapshotExtras();
+  }
   static uint32_t lastSendMs = 0;
   static int lastBackPos = -1;
   static int lastSeatPos = -1;
