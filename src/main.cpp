@@ -819,6 +819,9 @@ static uint8_t blePendingHelloSyncTries = 0;
 static bool bleSawRxSinceConnect = false;
 static uint32_t bleTxSuspendUntilMs = 0;
 static int bleTxLastErrRc = 0;
+static uint32_t bleTxFailCount = 0;
+static uint32_t bleTxLastFailAtMs = 0;
+static uint32_t bleTxLastOkAtMs = 0;
 
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -827,6 +830,8 @@ static int bleTxLastErrRc = 0;
 bool bleClienteConectado = false;
 #endif
 WiFiManager wifiManager;
+
+static const uint32_t BLE_KEEP_MIN_INTERVAL_MS = 250;
 
 // VariÃ¡veis de controle Supabase
 bool cadeiraHabilitada = true;
@@ -2210,6 +2215,11 @@ class MyServerCallbacks: public BLEServerCallbacks {
     blePendingHelloSyncLastSendMs = 0;
     blePendingHelloSyncTries = 0;
     bleSawRxSinceConnect = false;
+    bleTxSuspendUntilMs = 0;
+    bleTxLastErrRc = 0;
+    bleTxFailCount = 0;
+    bleTxLastFailAtMs = 0;
+    bleTxLastOkAtMs = millis();
     beepSeqStart(4, 100, 120);
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO CONECTADO!");
@@ -2225,6 +2235,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
     blePendingHelloSyncLastSendMs = 0;
     blePendingHelloSyncTries = 0;
     bleSawRxSinceConnect = false;
+    bleTxSuspendUntilMs = 0;
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO DESCONECTADO");
     Serial.println("====================================");
@@ -2271,7 +2282,13 @@ class MyTxCallbacks: public BLECharacteristicCallbacks {
     (void)pCharacteristic;
     if (s == BLECharacteristicCallbacks::Status::ERROR_GATT) {
       bleTxLastErrRc = (int)code;
+      bleTxFailCount++;
+      bleTxLastFailAtMs = millis();
       bleTxSuspendUntilMs = millis() + 2000;
+      return;
+    }
+    if (s == BLECharacteristicCallbacks::Status::SUCCESS_NOTIFY) {
+      bleTxLastOkAtMs = millis();
     }
   }
 };
@@ -4515,6 +4532,21 @@ void executaComandoBluetooth(String cmd, const char* origin) {
   cmdRaw.trim();
   cmd = cmdRaw;
   cmd.toUpperCase();
+  static uint32_t lastKeepSEMs = 0;
+  static uint32_t lastKeepDEMs = 0;
+  static uint32_t lastKeepSAMs = 0;
+  static uint32_t lastKeepDAMs = 0;
+  static uint32_t lastKeepSPMs = 0;
+  static uint32_t lastKeepDPMs = 0;
+  static uint32_t lastKeepTSMs = 0;
+  static uint32_t lastKeepTDMs = 0;
+  auto sendKeep = [&](const char* msg, uint32_t &lastMs) {
+    uint32_t now = millis();
+    if ((now - lastMs) > BLE_KEEP_MIN_INTERVAL_MS) {
+      enviarBLE(msg);
+      lastMs = now;
+    }
+  };
   if (origin && (String(origin) == "BLE" || String(origin) == "MQTT" || String(origin) == "SERIAL")) {
     String cu = cmd;
     bool isMotorCmd = (cu == "SE" || cu == "DE" || cu == "SA" || cu == "DA" || cu == "SP" || cu == "DP");
@@ -5438,7 +5470,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
         enviarBLE("SE:ON");
         iniciaTimerMotor();
       } else {
-        enviarBLE("SE:KEEP"); // Motor já ligado, mantendo
+        sendKeep("SE:KEEP", lastKeepSEMs);
       }
     } else {
       enviarBLE("SE:LIMIT");
@@ -5471,7 +5503,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
         enviarBLE("DE:ON");
         iniciaTimerMotor();
       } else {
-        enviarBLE("DE:KEEP");
+        sendKeep("DE:KEEP", lastKeepDEMs);
       }
     } else {
       enviarBLE("DE:LIMIT");
@@ -5504,7 +5536,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
         enviarBLE("SA:ON");
         iniciaTimerMotor();
       } else {
-        enviarBLE("SA:KEEP");
+        sendKeep("SA:KEEP", lastKeepSAMs);
       }
     } else {
       enviarBLE("SA:LIMIT");
@@ -5534,7 +5566,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
         enviarBLE("DA:ON");
         iniciaTimerMotor();
       } else {
-        enviarBLE("DA:KEEP");
+        sendKeep("DA:KEEP", lastKeepDAMs);
       }
     } else {
       enviarBLE("DA:LIMIT");
@@ -5578,7 +5610,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
         enviarBLE("SP:ON");
         iniciaTimerMotor();
       } else {
-        enviarBLE("SP:KEEP");
+        sendKeep("SP:KEEP", lastKeepSPMs);
       }
     } else {
       enviarBLE("SP:LIMIT");
@@ -5619,7 +5651,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
         enviarBLE("DP:ON");
         iniciaTimerMotor();
       } else {
-        enviarBLE("DP:KEEP");
+        sendKeep("DP:KEEP", lastKeepDPMs);
       }
     } else {
       enviarBLE("DP:LIMIT");
@@ -5647,7 +5679,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("TS:ON");
       iniciaTimerMotor();
     } else {
-      enviarBLE("TS:KEEP");
+      sendKeep("TS:KEEP", lastKeepTSMs);
     }
   }
   else if (cmd == "TD") {
@@ -5668,7 +5700,7 @@ void executaComandoBluetooth(String cmd, const char* origin) {
       enviarBLE("TD:ON");
       iniciaTimerMotor();
     } else {
-      enviarBLE("TD:KEEP");
+      sendKeep("TD:KEEP", lastKeepTDMs);
     }
   }
   else if (cmd == "T0") {
@@ -6066,6 +6098,18 @@ static void bleStatusStreamTick() {
   }
 
   uint32_t now = millis();
+  static uint32_t lastPrintedFailCount = 0;
+  static uint32_t lastFailPrintAtMs = 0;
+  if (bleTxFailCount != lastPrintedFailCount) {
+    if (lastFailPrintAtMs == 0 || (now - lastFailPrintAtMs) > 300) {
+      Serial.print("[BLE_TX] FAIL rc=");
+      Serial.print(bleTxLastErrRc);
+      Serial.print(" count=");
+      Serial.println(bleTxFailCount);
+      lastPrintedFailCount = bleTxFailCount;
+      lastFailPrintAtMs = now;
+    }
+  }
   if (blePendingHelloSync) {
     bool ready = bleSawRxSinceConnect || ((now - blePendingHelloSyncAtMs) > 1500);
     if (ready) {
@@ -8749,6 +8793,17 @@ void monitoraSistema() {
   if (bleClienteConectado && pServer != NULL) {
     Serial.print("BLE Clientes: "); 
     Serial.println(pServer->getConnectedCount());
+    Serial.print("BLE TX FAIL: ");
+    Serial.print(bleTxFailCount);
+    Serial.print(" lastRc=");
+    Serial.print(bleTxLastErrRc);
+    Serial.print(" suspendMs=");
+    uint32_t now = millis();
+    if (bleTxSuspendUntilMs != 0 && static_cast<int32_t>(now - bleTxSuspendUntilMs) < 0) {
+      Serial.println((uint32_t)(bleTxSuspendUntilMs - now));
+    } else {
+      Serial.println(0);
+    }
   }
 #else
   Serial.println("BLE Status: NA");
