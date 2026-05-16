@@ -2229,6 +2229,12 @@ class MyServerCallbacks: public BLEServerCallbacks {
     Serial.println("====================================\n");
   };
 
+  void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
+    if (param != nullptr) {
+      pServer->updateConnParams(param->connect.remote_bda, 24, 48, 0, 600);
+    }
+  }
+
   void onDisconnect(BLEServer* pServer) {
     bleClienteConectado = false;
     blePendingHelloSync = false;
@@ -2315,6 +2321,8 @@ static void bleAtualizaDisponibilidade() {
     Serial.println(NOME_DISPOSITIVO);
 
     BLEDevice::init(NOME_DISPOSITIVO.c_str());
+    BLEDevice::setPower(ESP_PWR_LVL_P9);
+    BLEDevice::setMTU(247);
     pServer = BLEDevice::createServer();
     pServer->setCallbacks(new MyServerCallbacks());
 
@@ -2369,8 +2377,16 @@ void enviarBLE(String msg) {
   if (pServer != NULL && pServer->getConnectedCount() == 0) {
     return;
   }
-  if (msg.length() > 595) {
-    msg = msg.substring(0, 595);
+  uint16_t mtu = 23;
+  if (pServer != NULL) {
+    uint16_t connId = pServer->getConnId();
+    uint16_t peerMtu = pServer->getPeerMTU(connId);
+    if (peerMtu > 0) mtu = peerMtu;
+  }
+  size_t maxLen = (mtu > 3) ? (mtu - 3) : 20;
+  if (maxLen > 595) maxLen = 595;
+  if (msg.length() > (int)maxLen) {
+    msg = msg.substring(0, (int)maxLen);
   }
   {
     pCharacteristicTX->setValue(msg.c_str());
@@ -2395,8 +2411,16 @@ static void enviarBLEQuiet(String msg) {
   if (pServer != NULL && pServer->getConnectedCount() == 0) {
     return;
   }
-  if (msg.length() > 595) {
-    msg = msg.substring(0, 595);
+  uint16_t mtu = 23;
+  if (pServer != NULL) {
+    uint16_t connId = pServer->getConnId();
+    uint16_t peerMtu = pServer->getPeerMTU(connId);
+    if (peerMtu > 0) mtu = peerMtu;
+  }
+  size_t maxLen = (mtu > 3) ? (mtu - 3) : 20;
+  if (maxLen > 595) maxLen = 595;
+  if (msg.length() > (int)maxLen) {
+    msg = msg.substring(0, (int)maxLen);
   }
   {
     pCharacteristicTX->setValue(msg.c_str());
