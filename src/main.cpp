@@ -829,6 +829,7 @@ static String bleRxBuf;
 static String bleCmdQueue[8];
 static uint8_t bleCmdQHead = 0;
 static uint8_t bleCmdQTail = 0;
+static BLE2902* bleTxCccd = NULL;
 
 static bool bleCmdQueueIsFull() {
   return static_cast<uint8_t>((bleCmdQTail + 1) % 8) == bleCmdQHead;
@@ -2427,7 +2428,8 @@ static void bleAtualizaDisponibilidade() {
       CHARACTERISTIC_UUID_TX,
       BLECharacteristic::PROPERTY_NOTIFY
     );
-    pCharacteristicTX->addDescriptor(new BLE2902());
+    bleTxCccd = new BLE2902();
+    pCharacteristicTX->addDescriptor(bleTxCccd);
     pCharacteristicTX->setCallbacks(new MyTxCallbacks());
 
     pCharacteristicRX = pService->createCharacteristic(
@@ -2440,6 +2442,8 @@ static void bleAtualizaDisponibilidade() {
     bleAdvertising = BLEDevice::getAdvertising();
     bleAdvertising->addServiceUUID(SERVICE_UUID);
     bleAdvertising->setScanResponse(true);
+    bleAdvertising->setMinInterval(0x00A0);
+    bleAdvertising->setMaxInterval(0x0100);
     BLEDevice::startAdvertising();
     bleInicializado = true;
     bleAdvertisingAtivo = true;
@@ -2472,6 +2476,9 @@ void enviarBLE(String msg) {
   if (!bleSawRxSinceConnect && bleLastConnectAtMs != 0 && (now - bleLastConnectAtMs) < 1500) {
     return;
   }
+  if (bleTxCccd != NULL && !bleTxCccd->getNotifications()) {
+    return;
+  }
   if (bleTxSuspendUntilMs != 0 && static_cast<int32_t>(now - bleTxSuspendUntilMs) < 0) {
     return;
   }
@@ -2488,8 +2495,10 @@ void enviarBLE(String msg) {
   {
     pCharacteristicTX->setValue(msg.c_str());
     pCharacteristicTX->notify();
-    Serial.print("[BLE] Enviado: ");
-    Serial.println(msg);
+    if (!msg.startsWith("STATUS:")) {
+      Serial.print("[BLE] Enviado: ");
+      Serial.println(msg);
+    }
   }
 #else
   Serial.println(msg);
@@ -2503,6 +2512,9 @@ static void enviarBLEQuiet(String msg) {
   }
   uint32_t now = millis();
   if (!bleSawRxSinceConnect && bleLastConnectAtMs != 0 && (now - bleLastConnectAtMs) < 1500) {
+    return;
+  }
+  if (bleTxCccd != NULL && !bleTxCccd->getNotifications()) {
     return;
   }
   if (bleTxSuspendUntilMs != 0 && static_cast<int32_t>(now - bleTxSuspendUntilMs) < 0) {
