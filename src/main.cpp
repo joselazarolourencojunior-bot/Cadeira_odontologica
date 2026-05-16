@@ -817,11 +817,53 @@ static uint32_t blePendingHelloSyncAtMs = 0;
 static uint32_t blePendingHelloSyncLastSendMs = 0;
 static uint8_t blePendingHelloSyncTries = 0;
 static bool bleSawRxSinceConnect = false;
+static uint32_t bleLastConnectAtMs = 0;
+static uint32_t bleAdvCooldownUntilMs = 0;
+static uint8_t bleQuickDiscCount = 0;
 static uint32_t bleTxSuspendUntilMs = 0;
 static int bleTxLastErrRc = 0;
 static uint32_t bleTxFailCount = 0;
 static uint32_t bleTxLastFailAtMs = 0;
 static uint32_t bleTxLastOkAtMs = 0;
+static String bleRxBuf;
+static String bleCmdQueue[8];
+static uint8_t bleCmdQHead = 0;
+static uint8_t bleCmdQTail = 0;
+
+static bool bleCmdQueueIsFull() {
+  return static_cast<uint8_t>((bleCmdQTail + 1) % 8) == bleCmdQHead;
+}
+
+static bool bleCmdQueueIsEmpty() {
+  return bleCmdQHead == bleCmdQTail;
+}
+
+static void bleCmdQueueClear() {
+  bleCmdQHead = 0;
+  bleCmdQTail = 0;
+  for (uint8_t i = 0; i < 8; i++) {
+    bleCmdQueue[i] = "";
+  }
+}
+
+static bool bleCmdEnq(String cmd) {
+  if (cmd.length() == 0) return false;
+  if (bleCmdQueueIsFull()) {
+    bleCmdQueueClear();
+    return false;
+  }
+  bleCmdQueue[bleCmdQTail] = cmd;
+  bleCmdQTail = static_cast<uint8_t>((bleCmdQTail + 1) % 8);
+  return true;
+}
+
+static bool bleCmdDeq(String* out) {
+  if (bleCmdQueueIsEmpty()) return false;
+  if (out) *out = bleCmdQueue[bleCmdQHead];
+  bleCmdQueue[bleCmdQHead] = "";
+  bleCmdQHead = static_cast<uint8_t>((bleCmdQHead + 1) % 8);
+  return true;
+}
 
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -2208,43 +2250,52 @@ static void beepSeqStart(uint8_t count, uint16_t onMs, uint16_t offMs);
 
 class MyServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
+    uint32_t now = millis();
     bleClienteConectado = true;
+    bleLastConnectAtMs = now;
+    bleAdvCooldownUntilMs = 0;
+    if (bleAdvertising) {
+      bleAdvertising->stop();
+    }
     bleAdvertisingAtivo = false;
     blePendingHelloSync = true;
-    blePendingHelloSyncAtMs = millis();
+    blePendingHelloSyncAtMs = now;
     blePendingHelloSyncLastSendMs = 0;
     blePendingHelloSyncTries = 0;
     bleSawRxSinceConnect = false;
+    bleRxBuf = "";
+    bleCmdQueueClear();
     bleTxSuspendUntilMs = 0;
     bleTxLastErrRc = 0;
     bleTxFailCount = 0;
     bleTxLastFailAtMs = 0;
-    bleTxLastOkAtMs = millis();
+    bleTxLastOkAtMs = now;
     beepSeqStart(4, 100, 120);
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO CONECTADO!");
     Serial.println("====================================");
+    Serial.print("[BLE] t=");
+    Serial.println(now);
     Serial.print("Total de clientes conectados: ");
     Serial.println(pServer->getConnectedCount());
     Serial.println("====================================\n");
   };
 
-  void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
-    if (param != nullptr) {
-      pServer->updateConnParams(param->connect.remote_bda, 24, 48, 0, 600);
-    }
-  }
-
   void onDisconnect(BLEServer* pServer) {
+    uint32_t now = millis();
     bleClienteConectado = false;
     blePendingHelloSync = false;
     blePendingHelloSyncLastSendMs = 0;
     blePendingHelloSyncTries = 0;
     bleSawRxSinceConnect = false;
     bleTxSuspendUntilMs = 0;
+    bleRxBuf = "";
+    bleCmdQueueClear();
     Serial.println("\n====================================");
     Serial.println("  [BLE] DISPOSITIVO DESCONECTADO");
     Serial.println("====================================");
+    Serial.print("[BLE] t=");
+    Serial.println(now);
     Serial.println("[BLE] disconnect -> STOP ALL");
     AT_SEG();
     comandoBLE = "";
@@ -2257,11 +2308,33 @@ class MyServerCallbacks: public BLEServerCallbacks {
     trendRemoteActive = false;
     faz_m1 = false;
     vzInicialEmAndamento = false;
-    delay(500);
-    pServer->startAdvertising();
-    bleAdvertisingAtivo = true;
-    Serial.println("[BLE] Advertising reiniciado");
-    Serial.println("Aguardando nova conexao...");
+
+    uint32_t aliveMs = (bleLastConnectAtMs > 0) ? (now - bleLastConnectAtMs) : 0;
+    if (aliveMs > 0 && aliveMs < 3000) {
+      if (bleQuickDiscCount < 255) bleQuickDiscCount++;
+    } else {
+      bleQuickDiscCount = 0;
+    }
+    if (bleQuickDiscCount >= 3) {
+      bleAdvCooldownUntilMs = now + 2000;
+    } else {
+      bleAdvCooldownUntilMs = 0;
+    }
+
+    if (bleAdvertising) {
+      bleAdvertising->stop();
+    }
+    bleAdvertisingAtivo = false;
+
+    if (bleAdvCooldownUntilMs != 0 && static_cast<int32_t>(now - bleAdvCooldownUntilMs) < 0) {
+      Serial.print("[BLE] Cooldown adv ms=");
+      Serial.println((uint32_t)(bleAdvCooldownUntilMs - now));
+    } else {
+      BLEDevice::startAdvertising();
+      bleAdvertisingAtivo = true;
+      Serial.println("[BLE] Advertising reiniciado");
+      Serial.println("Aguardando nova conexao...");
+    }
     Serial.println("====================================\n");
   }
 };
@@ -2272,13 +2345,46 @@ class MyCallbacks: public BLECharacteristicCallbacks {
     
     if (rxValue.length() > 0) {
       bleSawRxSinceConnect = true;
-      comandoBLE = "";
-      for (int i = 0; i < rxValue.length(); i++) {
-        comandoBLE += rxValue[i];
+      for (size_t i = 0; i < rxValue.length(); i++) {
+        char c = rxValue[i];
+        bleRxBuf += c;
+        if (bleRxBuf.length() > 160) {
+          Serial.println("[BLE] RX overflow");
+          bleRxBuf = "";
+          bleCmdQueueClear();
+          return;
+        }
       }
-      comandoBLE.trim();
-      Serial.print("[BLE] Comando recebido: ");
-      Serial.println(comandoBLE);
+
+      bool hadDelimiter = false;
+      for (;;) {
+        int idxN = bleRxBuf.indexOf('\n');
+        int idxR = bleRxBuf.indexOf('\r');
+        int idx = -1;
+        if (idxN >= 0 && idxR >= 0) idx = min(idxN, idxR);
+        else if (idxN >= 0) idx = idxN;
+        else if (idxR >= 0) idx = idxR;
+        if (idx < 0) break;
+        hadDelimiter = true;
+        String line = bleRxBuf.substring(0, idx);
+        bleRxBuf = bleRxBuf.substring(idx + 1);
+        line.trim();
+        if (line.length() == 0) continue;
+        bleCmdEnq(line);
+        Serial.print("[BLE] RX: ");
+        Serial.println(line);
+      }
+
+      if (!hadDelimiter && bleRxBuf.length() > 0 && rxValue.find('\n') == std::string::npos && rxValue.find('\r') == std::string::npos) {
+        String line = bleRxBuf;
+        bleRxBuf = "";
+        line.trim();
+        if (line.length() > 0) {
+          bleCmdEnq(line);
+          Serial.print("[BLE] RX: ");
+          Serial.println(line);
+        }
+      }
     }
   }
 };
@@ -2303,16 +2409,6 @@ class MyTxCallbacks: public BLECharacteristicCallbacks {
 #if HAS_BLE
 static void bleAtualizaDisponibilidade() {
   bool permitido = true;
-#if !OFFLINE_DEMO
-  permitido = (WiFi.status() == WL_CONNECTED && mqttClient.connected());
-#endif
-  if (!permitido) {
-    if (bleAdvertising && !bleClienteConectado) {
-      bleAdvertising->stop();
-      bleAdvertisingAtivo = false;
-    }
-    return;
-  }
   if (!bleInicializado) {
     Serial.println("\n====================================");
     Serial.println("  INICIALIZANDO BLE");
@@ -2329,14 +2425,14 @@ static void bleAtualizaDisponibilidade() {
     BLEService *pService = pServer->createService(SERVICE_UUID);
     pCharacteristicTX = pService->createCharacteristic(
       CHARACTERISTIC_UUID_TX,
-      BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_WRITE_NR
+      BLECharacteristic::PROPERTY_NOTIFY
     );
     pCharacteristicTX->addDescriptor(new BLE2902());
     pCharacteristicTX->setCallbacks(new MyTxCallbacks());
 
     pCharacteristicRX = pService->createCharacteristic(
       CHARACTERISTIC_UUID_RX,
-      BLECharacteristic::PROPERTY_WRITE
+      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
     );
     pCharacteristicRX->setCallbacks(new MyCallbacks());
     pService->start();
@@ -2344,8 +2440,6 @@ static void bleAtualizaDisponibilidade() {
     bleAdvertising = BLEDevice::getAdvertising();
     bleAdvertising->addServiceUUID(SERVICE_UUID);
     bleAdvertising->setScanResponse(true);
-    bleAdvertising->setMinPreferred(0x06);
-    bleAdvertising->setMaxPreferred(0x12);
     BLEDevice::startAdvertising();
     bleInicializado = true;
     bleAdvertisingAtivo = true;
@@ -2359,6 +2453,10 @@ static void bleAtualizaDisponibilidade() {
     return;
   }
   if (!bleClienteConectado && bleAdvertising && !bleAdvertisingAtivo) {
+    uint32_t now = millis();
+    if (bleAdvCooldownUntilMs != 0 && static_cast<int32_t>(now - bleAdvCooldownUntilMs) < 0) {
+      return;
+    }
     BLEDevice::startAdvertising();
     bleAdvertisingAtivo = true;
   }
@@ -2371,22 +2469,21 @@ void enviarBLE(String msg) {
     return;
   }
   uint32_t now = millis();
+  if (!bleSawRxSinceConnect && bleLastConnectAtMs != 0 && (now - bleLastConnectAtMs) < 1500) {
+    return;
+  }
   if (bleTxSuspendUntilMs != 0 && static_cast<int32_t>(now - bleTxSuspendUntilMs) < 0) {
     return;
   }
   if (pServer != NULL && pServer->getConnectedCount() == 0) {
     return;
   }
-  uint16_t mtu = 23;
-  if (pServer != NULL) {
-    uint16_t connId = pServer->getConnId();
-    uint16_t peerMtu = pServer->getPeerMTU(connId);
-    if (peerMtu > 0) mtu = peerMtu;
+  if (!msg.endsWith("\n")) {
+    msg += "\n";
   }
-  size_t maxLen = (mtu > 3) ? (mtu - 3) : 20;
-  if (maxLen > 595) maxLen = 595;
-  if (msg.length() > (int)maxLen) {
-    msg = msg.substring(0, (int)maxLen);
+  if (msg.length() > 595) {
+    msg = msg.substring(0, 594);
+    msg += "\n";
   }
   {
     pCharacteristicTX->setValue(msg.c_str());
@@ -2405,22 +2502,21 @@ static void enviarBLEQuiet(String msg) {
     return;
   }
   uint32_t now = millis();
+  if (!bleSawRxSinceConnect && bleLastConnectAtMs != 0 && (now - bleLastConnectAtMs) < 1500) {
+    return;
+  }
   if (bleTxSuspendUntilMs != 0 && static_cast<int32_t>(now - bleTxSuspendUntilMs) < 0) {
     return;
   }
   if (pServer != NULL && pServer->getConnectedCount() == 0) {
     return;
   }
-  uint16_t mtu = 23;
-  if (pServer != NULL) {
-    uint16_t connId = pServer->getConnId();
-    uint16_t peerMtu = pServer->getPeerMTU(connId);
-    if (peerMtu > 0) mtu = peerMtu;
+  if (!msg.endsWith("\n")) {
+    msg += "\n";
   }
-  size_t maxLen = (mtu > 3) ? (mtu - 3) : 20;
-  if (maxLen > 595) maxLen = 595;
-  if (msg.length() > (int)maxLen) {
-    msg = msg.substring(0, (int)maxLen);
+  if (msg.length() > 595) {
+    msg = msg.substring(0, 594);
+    msg += "\n";
   }
   {
     pCharacteristicTX->setValue(msg.c_str());
@@ -4524,6 +4620,12 @@ static void resetParaPrimeiraVez() {
 // ========== BLUETOOTH - PROCESSA COMANDOS DO APP ==========
 void processaComandosBluetooth() {
 #if HAS_BLE
+  if (comandoBLE.length() == 0) {
+    String nextCmd;
+    if (bleCmdDeq(&nextCmd)) {
+      comandoBLE = nextCmd;
+    }
+  }
   if (comandoBLE.length() > 0) {
     String cmd = comandoBLE;
     comandoBLE = "";
@@ -6033,27 +6135,32 @@ void executaComandoBluetooth(String cmd, const char* origin) {
 
 // Envia status completo via BLE em formato JSON
 void enviaStatusBluetooth() {
-  StaticJsonDocument<896> doc;
-  
+  StaticJsonDocument<512> doc;
+  const size_t statusJsonMaxLen = 180;
+
   doc["enabled"] = cadeiraHabilitada;
-  doc["maintenanceRequired"] = manutencaoNecessaria;
+  doc["manutencao"] = manutencaoNecessaria;
   doc["hourMeter"] = horimetro;
-  doc["wifiConnected"] = (WiFi.status() == WL_CONNECTED);
-  
-  // Estados dos relés
-  doc["reflectorOn"] = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
-  doc["backUpOn"] = (Rele_SE >= 0) ? relayIsOn(Rele_SE) : false;
-  doc["backDownOn"] = (Rele_DE >= 0) ? relayIsOn(Rele_DE) : false;
-  doc["seatUpOn"] = (Rele_SA >= 0) ? relayIsOn(Rele_SA) : false;
-  doc["seatDownOn"] = (Rele_DA >= 0) ? relayIsOn(Rele_DA) : false;
-  doc["upperLegsOn"] = (Rele_SP >= 0) ? relayIsOn(Rele_SP) : false;
-  doc["lowerLegsOn"] = (Rele_DP >= 0) ? relayIsOn(Rele_DP) : false;
-  doc["trendUpOn"] = (Rele_TREND_SOBE >= 0) ? relayIsOn(Rele_TREND_SOBE) : false;
-  doc["trendDownOn"] = (Rele_TREND_DESCE >= 0) ? relayIsOn(Rele_TREND_DESCE) : false;
-  
-  doc["backPosition"] = incoder_virtual_encosto_service;
-  doc["seatPosition"] = incoder_virtual_asento_service;
-  doc["legPosition"] = incoder_virtual_perneira_service;
+  doc["wifi"] = (WiFi.status() == WL_CONNECTED);
+
+  doc["refletor"] = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
+
+  bool backUpOn = (Rele_SE >= 0) ? relayIsOn(Rele_SE) : false;
+  bool backDownOn = (Rele_DE >= 0) ? relayIsOn(Rele_DE) : false;
+  bool seatUpOn = (Rele_SA >= 0) ? relayIsOn(Rele_SA) : false;
+  bool seatDownOn = (Rele_DA >= 0) ? relayIsOn(Rele_DA) : false;
+  bool upperLegsOn = (Rele_SP >= 0) ? relayIsOn(Rele_SP) : false;
+  bool lowerLegsOn = (Rele_DP >= 0) ? relayIsOn(Rele_DP) : false;
+  if (backUpOn) doc["backUpOn"] = true;
+  if (backDownOn) doc["backDownOn"] = true;
+  if (seatUpOn) doc["seatUpOn"] = true;
+  if (seatDownOn) doc["seatDownOn"] = true;
+  if (upperLegsOn) doc["upperLegsOn"] = true;
+  if (lowerLegsOn) doc["lowerLegsOn"] = true;
+
+  doc["encosto_pos"] = incoder_virtual_encosto_service;
+  doc["assento_pos"] = incoder_virtual_asento_service;
+  doc["perneira_pos"] = incoder_virtual_perneira_service;
   int encMaxOut = fim_encosto_encoder;
   int assMaxOut = fim_asento_encoder;
   int perMaxOut = fim_perneira_encoder;
@@ -6068,21 +6175,36 @@ void enviaStatusBluetooth() {
   doc["encosto_max"] = encMaxOut;
   doc["assento_max"] = assMaxOut;
   doc["perneira_max"] = perMaxOut;
-  doc["gavetaOpen"] = isGavetaAbertaRaw();
-  doc["gavetaLockIgnored"] = ignoreGavetaLock;
-  doc["isMovingToGineco"] = (cont == 1) || vzInicialEmAndamento;
-  doc["isMovingToParto"] = (cont13 == 1);
-  
-  // Limites
-  doc["backUpLimit"] = trava_bt_SE;
-  doc["backDownLimit"] = trava_bt_DE;
-  doc["seatUpLimit"] = trava_bt_SA;
-  doc["seatDownLimit"] = trava_bt_DA;
-  doc["legUpLimit"] = trava_bt_SP;
-  doc["legDownLimit"] = trava_bt_DP;
+  if (isGavetaAbertaRaw()) doc["gavetaOpen"] = true;
+  if (ignoreGavetaLock) doc["gavetaLockIgnored"] = true;
+  if ((cont == 1) || vzInicialEmAndamento) doc["isMovingToGineco"] = true;
+  if (cont13 == 1) doc["isMovingToParto"] = true;
+
+  if (trava_bt_SE) doc["se_limit"] = true;
+  if (trava_bt_DE) doc["de_limit"] = true;
+  if (trava_bt_SA) doc["sa_limit"] = true;
+  if (trava_bt_DA) doc["da_limit"] = true;
+  if (trava_bt_SP) doc["sp_limit"] = true;
+  if (trava_bt_DP) doc["dp_limit"] = true;
 
   String output;
   serializeJson(doc, output);
+  if (output.length() > statusJsonMaxLen) {
+    StaticJsonDocument<256> d2;
+    d2["enabled"] = cadeiraHabilitada;
+    d2["manutencao"] = manutencaoNecessaria;
+    d2["hourMeter"] = horimetro;
+    d2["wifi"] = (WiFi.status() == WL_CONNECTED);
+    d2["refletor"] = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
+    d2["encosto_pos"] = incoder_virtual_encosto_service;
+    d2["assento_pos"] = incoder_virtual_asento_service;
+    d2["perneira_pos"] = incoder_virtual_perneira_service;
+    d2["encosto_max"] = encMaxOut;
+    d2["assento_max"] = assMaxOut;
+    d2["perneira_max"] = perMaxOut;
+    output = "";
+    serializeJson(d2, output);
+  }
   enviarBLE("STATUS:" + output);
 }
 
@@ -6140,7 +6262,6 @@ static void bleStatusStreamTick() {
       bool canSend = (blePendingHelloSyncLastSendMs == 0) || ((now - blePendingHelloSyncLastSendMs) > 1000);
       if (canSend) {
         enviaStatusBluetooth();
-        bleSendAllSnapshotExtras();
         blePendingHelloSyncLastSendMs = now;
         blePendingHelloSyncTries++;
         if (bleSawRxSinceConnect || blePendingHelloSyncTries >= 5) {
@@ -6219,51 +6340,47 @@ static void bleStatusStreamTick() {
   lastTrendDownOn = trendDownOn;
   lastMoving = moving;
 
-  StaticJsonDocument<512> doc;
-  doc["backPosition"] = backPos;
-  doc["seatPosition"] = seatPos;
-  doc["legPosition"] = legPos;
+  StaticJsonDocument<384> doc;
+  const size_t statusJsonMaxLen = 180;
+  doc["refletor"] = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
+  doc["encosto_pos"] = backPos;
+  doc["assento_pos"] = seatPos;
+  doc["perneira_pos"] = legPos;
   doc["encosto_max"] = encMaxOut;
   doc["assento_max"] = assMaxOut;
   doc["perneira_max"] = perMaxOut;
 
-  doc["reflectorOn"] = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
-  doc["backUpOn"] = backUpOn;
-  doc["backDownOn"] = backDownOn;
-  doc["seatUpOn"] = seatUpOn;
-  doc["seatDownOn"] = seatDownOn;
-  doc["upperLegsOn"] = legUpOn;
-  doc["lowerLegsOn"] = legDownOn;
-  doc["trendUpOn"] = trendUpOn;
-  doc["trendDownOn"] = trendDownOn;
+  if (backUpOn) doc["backUpOn"] = true;
+  if (backDownOn) doc["backDownOn"] = true;
+  if (seatUpOn) doc["seatUpOn"] = true;
+  if (seatDownOn) doc["seatDownOn"] = true;
+  if (legUpOn) doc["upperLegsOn"] = true;
+  if (legDownOn) doc["lowerLegsOn"] = true;
+  if (trendUpOn) doc["trendUpOn"] = true;
+  if (trendDownOn) doc["trendDownOn"] = true;
 
-  doc["gavetaOpen"] = isGavetaAbertaRaw();
-  doc["isMovingToGineco"] = (cont == 1) || vzInicialEmAndamento;
-  doc["isMovingToParto"] = (cont13 == 1);
+  if (isGavetaAbertaRaw()) doc["gavetaOpen"] = true;
+  if ((cont == 1) || vzInicialEmAndamento) doc["isMovingToGineco"] = true;
+  if (cont13 == 1) doc["isMovingToParto"] = true;
 
-  doc["backUpLimit"] = trava_bt_SE;
-  doc["backDownLimit"] = trava_bt_DE;
-  doc["seatUpLimit"] = trava_bt_SA;
-  doc["seatDownLimit"] = trava_bt_DA;
-  doc["legUpLimit"] = trava_bt_SP;
-  doc["legDownLimit"] = trava_bt_DP;
+  if (trava_bt_SE) doc["se_limit"] = true;
+  if (trava_bt_DE) doc["de_limit"] = true;
+  if (trava_bt_SA) doc["sa_limit"] = true;
+  if (trava_bt_DA) doc["da_limit"] = true;
+  if (trava_bt_SP) doc["sp_limit"] = true;
+  if (trava_bt_DP) doc["dp_limit"] = true;
 
   String output;
   serializeJson(doc, output);
-  if (output.length() > 590) {
+  if (output.length() > statusJsonMaxLen) {
     StaticJsonDocument<256> d2;
-    d2["backPosition"] = backPos;
-    d2["seatPosition"] = seatPos;
-    d2["legPosition"] = legPos;
+    d2["refletor"] = (Rele_refletor >= 0) ? relayIsOn(Rele_refletor) : false;
+    d2["encosto_pos"] = backPos;
+    d2["assento_pos"] = seatPos;
+    d2["perneira_pos"] = legPos;
     d2["encosto_max"] = encMaxOut;
     d2["assento_max"] = assMaxOut;
     d2["perneira_max"] = perMaxOut;
-    d2["backUpOn"] = backUpOn;
-    d2["backDownOn"] = backDownOn;
-    d2["seatUpOn"] = seatUpOn;
-    d2["seatDownOn"] = seatDownOn;
-    d2["upperLegsOn"] = legUpOn;
-    d2["lowerLegsOn"] = legDownOn;
     output = "";
     serializeJson(d2, output);
   }
@@ -8814,6 +8931,8 @@ void monitoraSistema() {
 #if HAS_BLE
   Serial.print("BLE Status: "); 
   Serial.println(bleClienteConectado ? "CONECTADO" : "AGUARDANDO CONEXAO");
+  Serial.print("BLE Advertising: ");
+  Serial.println(bleAdvertisingAtivo ? "ATIVO" : "PARADO");
   if (bleClienteConectado && pServer != NULL) {
     Serial.print("BLE Clientes: "); 
     Serial.println(pServer->getConnectedCount());
