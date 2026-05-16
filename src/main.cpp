@@ -820,6 +820,9 @@ static bool bleSawRxSinceConnect = false;
 static uint32_t bleLastConnectAtMs = 0;
 static uint32_t bleAdvCooldownUntilMs = 0;
 static uint8_t bleQuickDiscCount = 0;
+static bool bleConnParamUpdatePending = false;
+static uint32_t bleConnParamUpdateAtMs = 0;
+static esp_bd_addr_t bleRemoteBda = {0};
 static uint32_t bleTxSuspendUntilMs = 0;
 static int bleTxLastErrRc = 0;
 static uint32_t bleTxFailCount = 0;
@@ -2282,6 +2285,25 @@ class MyServerCallbacks: public BLEServerCallbacks {
     Serial.println("====================================\n");
   };
 
+  void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
+    if (param != nullptr) {
+      memcpy(bleRemoteBda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+      bleConnParamUpdatePending = false;
+      bleConnParamUpdateAtMs = 0;
+      Serial.print("[BLE] conn_id=");
+      Serial.print(param->connect.conn_id);
+      Serial.print(" remote_bda=");
+      for (int i = 0; i < 6; i++) {
+        if (i) Serial.print(":");
+        uint8_t b = bleRemoteBda[i];
+        if (b < 16) Serial.print("0");
+        Serial.print(b, HEX);
+      }
+      Serial.println();
+      Serial.println("[BLE] updateConnParams desativado (evitar disconnect reason=0x28)");
+    }
+  }
+
   void onDisconnect(BLEServer* pServer) {
     uint32_t now = millis();
     bleClienteConectado = false;
@@ -2337,6 +2359,16 @@ class MyServerCallbacks: public BLEServerCallbacks {
       Serial.println("Aguardando nova conexao...");
     }
     Serial.println("====================================\n");
+  }
+
+  void onDisconnect(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
+    (void)pServer;
+    if (param != nullptr) {
+      Serial.print("[BLE] disconnect conn_id=");
+      Serial.print(param->disconnect.conn_id);
+      Serial.print(" reason=0x");
+      Serial.println(param->disconnect.reason, HEX);
+    }
   }
 };
 
@@ -2441,7 +2473,7 @@ static void bleAtualizaDisponibilidade() {
 
     bleAdvertising = BLEDevice::getAdvertising();
     bleAdvertising->addServiceUUID(SERVICE_UUID);
-    bleAdvertising->setScanResponse(true);
+    bleAdvertising->setScanResponse(false);
     bleAdvertising->setMinInterval(0x00A0);
     bleAdvertising->setMaxInterval(0x0100);
     BLEDevice::startAdvertising();
@@ -2463,6 +2495,10 @@ static void bleAtualizaDisponibilidade() {
     }
     BLEDevice::startAdvertising();
     bleAdvertisingAtivo = true;
+  }
+
+  if (bleClienteConectado && bleConnParamUpdatePending) {
+    bleConnParamUpdatePending = false;
   }
 }
 #endif
