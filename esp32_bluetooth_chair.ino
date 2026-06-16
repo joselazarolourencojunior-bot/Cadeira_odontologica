@@ -1,3 +1,22 @@
+/*
+ * ============================================================
+ * CADEIRA ODONTOLÓGICA - ESP32 Bluetooth Chair
+ * ============================================================
+ * 
+ * ⚠️  AVISO DE SEGURANÇA / SECURITY WARNING
+ * 
+ * 🔒 ESTE CÓDIGO É PARTE DE UM REPOSITÓRIO PRIVADO
+ * 🔒 THIS CODE IS PART OF A PRIVATE REPOSITORY
+ * 
+ * NÃO compartilhe este código publicamente
+ * NÃO publique em repositórios públicos
+ * MANTENHA as credenciais protegidas
+ * 
+ * Para configuração completa, veja README.md e SECURITY.md
+ * 
+ * ============================================================
+ */
+
 #include "BluetoothSerial.h"
 
 // Verificar se Bluetooth está disponível
