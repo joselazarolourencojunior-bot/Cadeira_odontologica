@@ -107,7 +107,7 @@ O dispositivo aparece como **"CadeiraOdonto-XXXX"** no pareamento (XXXX = últim
 2. Adicione o suporte ao ESP32:
    - Vá em `Arquivo > Preferências`
    - Em "URLs Adicionais", adicione: `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
-   - Instale `esp32 by Espressif` versão **2.0.17** (mesma do PlatformIO)
+   - Instale `esp32 by Espressif` (compatível com 2.0.17 e 3.x)
 3. Instale as bibliotecas:
    - WiFiManager by tzapu (2.0.17)
    - ArduinoJson by Benoit Blanchon (6.x)

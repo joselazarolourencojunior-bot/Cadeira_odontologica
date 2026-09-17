@@ -1619,12 +1619,13 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
 class MyCallbacks: public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) {
-    std::string rxValue = pCharacteristic->getValue();
-    
-    if (rxValue.length() > 0) {
+    const uint8_t* rxData = pCharacteristic->getData();
+    size_t rxLen = pCharacteristic->getLength();
+
+    if (rxLen > 0) {
       comandoBLE = "";
-      for (int i = 0; i < rxValue.length(); i++) {
-        comandoBLE += rxValue[i];
+      for (size_t i = 0; i < rxLen; i++) {
+        comandoBLE += (char)rxData[i];
       }
       comandoBLE.trim();
       Serial.print("[BLE] Comando recebido: ");
