@@ -545,6 +545,10 @@ typedef struct {
   int size;
 } OtaInfo;
 
+static bool otaParseManifestJson(const String& body, OtaInfo& out);
+static bool otaFetchManifest(OtaInfo& out);
+static bool otaDownloadAndUpdate(const OtaInfo& info);
+
 static inline bool mqttLockMs(uint32_t ms) {
   if (!mqttMutex) {
     return true;
