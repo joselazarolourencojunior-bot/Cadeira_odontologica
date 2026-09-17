@@ -39,7 +39,7 @@
 #define OFFLINE_MODE 0
 #endif
 
-#if OFFLINE_MODE || defined(CONFIG_IDF_TARGET_ESP32S2) || defined(ARDUINO_ESP32S2_DEV) || defined(ARDUINO_ESP32S2)
+#if OFFLINE_MODE
 #define HAS_BLE 0
 #else
 #define HAS_BLE 1
@@ -63,27 +63,27 @@ static const int IO_PCF_BASE = 100;
 #endif
 
 #ifndef PCF8574_INT_PIN
-#define PCF8574_INT_PIN -1
+#define PCF8574_INT_PIN 1
 #endif
 
 #ifndef PIN_SA
-#define PIN_SA 34
+#define PIN_SA 14
 #endif
 
 #ifndef PIN_RF
-#define PIN_RF 23
+#define PIN_RF 15
 #endif
 
 #ifndef PIN_GAVETA
-#define PIN_GAVETA -1
+#define PIN_GAVETA 20
 #endif
 
 #ifndef PIN_TREN_INT_DESCE
-#define PIN_TREN_INT_DESCE -1
+#define PIN_TREN_INT_DESCE 3
 #endif
 
 #ifndef PIN_INT_TREND_DESCE
-#define PIN_INT_TREND_DESCE -1
+#define PIN_INT_TREND_DESCE 8
 #endif
 
 #ifndef PIN_TREN_INT_SOBE
@@ -95,19 +95,27 @@ static const int IO_PCF_BASE = 100;
 #endif
 
 #ifndef PIN_ENCODER1
-#define PIN_ENCODER1 -1
+#define PIN_ENCODER1 4
 #endif
 
 #ifndef PIN_ENCODER2
-#define PIN_ENCODER2 -1
+#define PIN_ENCODER2 17
 #endif
 
 #ifndef PIN_ENCODER3
-#define PIN_ENCODER3 -1
+#define PIN_ENCODER3 19
 #endif
 
 #ifndef PIN_ENCODER_TREND
 #define PIN_ENCODER_TREND 46
+#endif
+
+#ifndef I2C_SDA
+#define I2C_SDA 2
+#endif
+
+#ifndef I2C_SCL
+#define I2C_SCL 18
 #endif
 
 #ifndef I2C_EARLY_TEST
@@ -1881,37 +1889,37 @@ static void applyMqttRuntimeConfig() {
 
 // Constantes - Pinos de SAÃDA (relÃ©s e indicadores)
 #ifndef PIN_RELE_SA
-#define PIN_RELE_SA 33
+#define PIN_RELE_SA 16
 #endif
 #ifndef PIN_RELE_DA
-#define PIN_RELE_DA 25
+#define PIN_RELE_DA 9
 #endif
 #ifndef PIN_RELE_SE
-#define PIN_RELE_SE 27
+#define PIN_RELE_SE 5
 #endif
 #ifndef PIN_RELE_DE
-#define PIN_RELE_DE 26
+#define PIN_RELE_DE 6
 #endif
 #ifndef PIN_RELE_SP
-#define PIN_RELE_SP 12
+#define PIN_RELE_SP 7
 #endif
 #ifndef PIN_RELE_DP
-#define PIN_RELE_DP 14
+#define PIN_RELE_DP 10
 #endif
 #ifndef PIN_RELE_REFLETOR
-#define PIN_RELE_REFLETOR 4
+#define PIN_RELE_REFLETOR 11
 #endif
 #ifndef PIN_RELE_TREND_DESCE
-#define PIN_RELE_TREND_DESCE -1
+#define PIN_RELE_TREND_DESCE 48
 #endif
 #ifndef PIN_RELE_TREND_SOBE
-#define PIN_RELE_TREND_SOBE -1
+#define PIN_RELE_TREND_SOBE 47
 #endif
 #ifndef PIN_LED
-#define PIN_LED 2
+#define PIN_LED 12
 #endif
 #ifndef PIN_BUZZER
-#define PIN_BUZZER 32
+#define PIN_BUZZER 13
 #endif
 
 const int Rele_SA = PIN_RELE_SA;
