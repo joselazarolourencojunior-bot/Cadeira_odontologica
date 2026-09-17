@@ -2,9 +2,9 @@
 
 ## Descrição
 
-Projeto de controle de cadeira odontológica utilizando ESP32 com:
+Projeto de controle de cadeira odontológica utilizando **ESP32-S3** com:
 
-- **Bluetooth Serial (SPP)** - Comunicação com app Flutter
+- **Bluetooth Low Energy (BLE, Nordic UART)** - Comunicação com app Flutter
 - **WiFiManager** - Configuração WiFi via portal captivo
 - **Supabase** - Telemetria, horímetro e bloqueio remoto
 - **Encoder Virtual** - Rastreamento de posição dos motores
@@ -21,43 +21,39 @@ Isso permite identificar cada cadeira de forma única no sistema Supabase.
 
 ## Hardware Necessário
 
-- ESP32 DevKit V1 ou similar
+- ESP32-S3 DevKitC-1 (módulo com 16 MB de flash)
 - Módulo de relés (8 canais)
 - Buzzer
 - LED indicador
 - Botões de controle
 
-## Pinagem ESP32
+## Pinagem ESP32-S3 (env `esp32s3`)
 
-### Entradas (Botões)
+### Entradas
+- Botões M1, SE, PT, VZ, DP, SP, DE, DA: PCF8574 (I2C, endereço 0x20) — SDA=GPIO2, SCL=GPIO18, INT=GPIO1
+- GPIO14: SA - Subir Assento
+- GPIO15: RF - Refletor / Reset WiFi (5s)
+- GPIO20: Gaveta
+- GPIO3 / GPIO8: fins de curso Trend (desce)
+- GPIO4, 17, 19: Encoders 1/2/3
 
-| Pino | Função                          |
-|------|---------------------------------|
-| 5    | DE - Deitar (Encosto)           |
-| 34   | SA - Subir Assento              |
-| 17   | DA - Descer Assento             |
-| 13   | SE - Sentar (Encosto)           |
-| 22   | VZ - Posição Ginecológica       |
-| 18   | SP - Subir Pernas               |
-| 19   | DP - Descer Pernas              |
-| 21   | PT - Posição de Parto           |
-| 23   | RF - Refletor / Reset WiFi (5s) |
-| 15   | M1 - Memória 1                  |
+### Saídas
 
-### Saídas (Relés e Indicadores)
+| GPIO | Função                |
+|------|-----------------------|
+| 16   | Relé Subir Assento    |
+| 9    | Relé Descer Assento   |
+| 5    | Relé Sentar (SE)      |
+| 6    | Relé Deitar (DE)      |
+| 7    | Relé Subir Pernas     |
+| 10   | Relé Descer Pernas (ativo baixo) |
+| 11   | Relé Refletor         |
+| 48   | Relé Trend Desce      |
+| 47   | Relé Trend Sobe       |
+| 12   | LED Indicador         |
+| 13   | Buzzer                |
 
-| Pino | Função              |
-|------|---------------------|
-| 33   | Relé Subir Assento  |
-| 25   | Relé Descer Assento |
-| 27   | Relé Sentar         |
-| 26   | Relé Deitar         |
-| 12   | Relé Subir Pernas   |
-| 14   | Relé Descer Pernas  |
-| 4    | Relé Refletor       |
-| 2    | LED Indicador       |
-| 32   | Buzzer              |
-| 16   | AD_PIC              |
+Detalhes completos em `../mapa_pinos_esp32s3_i2c_2_18.md`.
 
 ## Comandos Bluetooth
 
@@ -107,11 +103,20 @@ O dispositivo aparece como **"CadeiraOdonto-XXXX"** no pareamento (XXXX = últim
 2. Adicione o suporte ao ESP32:
    - Vá em `Arquivo > Preferências`
    - Em "URLs Adicionais", adicione: `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
+   - Instale `esp32 by Espressif` (compatível com 2.0.17 e 3.x)
 3. Instale as bibliotecas:
-   - WiFiManager by tzapu
-   - ArduinoJson by Benoit Blanchon
-4. Selecione a placa: `Ferramentas > Placa > ESP32 Dev Module`
-5. Faça o upload do código
+   - WiFiManager by tzapu (2.0.17)
+   - ArduinoJson by Benoit Blanchon (6.x)
+   - PubSubClient by Nick O'Leary (2.8)
+4. Abra o sketch `ESP32/arduino/esp32_bluetooth_chair_s3/esp32_bluetooth_chair_s3.ino`
+   (ele já contém os defines de pinos do env `esp32s3`; o código fica em `firmware.h`,
+   gerado a partir de `src/main.cpp` por `ESP32/arduino/sync_arduino_sketch.sh`)
+5. Selecione a placa `Ferramentas > Placa > ESP32S3 Dev Module` e configure:
+   - Flash Size: 16MB (128Mb)
+   - Partition Scheme: 16M Flash (3MB APP/9.9MB FATFS)
+   - PSRAM: conforme o módulo (OPI PSRAM ou Disabled)
+   - USB CDC On Boot: Enabled (se usar a USB nativa)
+6. Faça o upload do código
 
 ## Configuração WiFi
 
