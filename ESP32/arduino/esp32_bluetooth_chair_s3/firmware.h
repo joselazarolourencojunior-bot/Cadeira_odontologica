@@ -735,6 +735,7 @@ void executa_vz_ini();
 void executa_M1();
 void executa_pt();
 void AT_SEG();
+void desligaTodosReles(const char* src);
 void bip();
 void bipLong();
 void enviarBLE(String msg);
@@ -5215,8 +5216,17 @@ void monitora_tempo_rele() {
     if (inicioAtivacaoRele == 0) {
       inicioAtivacaoRele = millis();
     } else if (millis() - inicioAtivacaoRele >= TIMEOUT_RELE) {
-      Serial.println("!!! TIMEOUT DE SEGURANÃ‡A - RELÃ‰ ATIVO POR 30s !!!");
-      AT_SEG();
+      Serial.print("!!! TIMEOUT DE SEGURANCA - RELE ATIVO POR 30s:");
+      if (digitalRead(Rele_SE) == HIGH) Serial.print(" SE");
+      if (digitalRead(Rele_SA) == HIGH) Serial.print(" SA");
+      if (digitalRead(Rele_DA) == HIGH) Serial.print(" DA");
+      if (digitalRead(Rele_SP) == HIGH) Serial.print(" SP");
+      if (releLigado(Rele_DP)) Serial.print(" DP");
+      if (digitalRead(Rele_DE) == HIGH) Serial.print(" DE");
+      if (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) Serial.print(" TREND_SOBE");
+      if (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH) Serial.print(" TREND_DESCE");
+      Serial.println(" !!!");
+      desligaTodosReles("TIMEOUT");
       inicioAtivacaoRele = 0;
     }
   } else {
@@ -6081,34 +6091,37 @@ void executa_M1() {
 }
 
 // ========== PARADA DE EMERGÃŠNCIA (AT_SEG) ==========
+void desligaTodosReles(const char* src) {
+  setOutputPin(Rele_DE, false, src);
+  setOutputPin(Rele_SE, false, src);
+  setOutputPin(Rele_SA, false, src);
+  setOutputPin(Rele_DA, false, src);
+  setOutputPin(Rele_SP, false, src);
+  setOutputPin(Rele_DP, false, src);
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, src);
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, src);
+
+  estado_de = false;
+  estado_se = false;
+  estado_sa = false;
+  estado_da = false;
+  estado_sp = false;
+  estado_dp = false;
+  estado_trend_sobe = false;
+  estado_trend_desce = false;
+
+  buzzerPulseStop();
+  faz_bt_seg = 0;
+  cont = 0;
+  cont13 = 0;
+}
+
 void AT_SEG() {
   if (faz_bt_seg == 1) {
     Serial.println("Parando todos os movimentos");
     enviarBLE("AT_SEG:STOPPING");
-
-    setOutputPin(Rele_DE, false, "AT_SEG");
-    setOutputPin(Rele_SE, false, "AT_SEG");
-    setOutputPin(Rele_SA, false, "AT_SEG");
-    setOutputPin(Rele_DA, false, "AT_SEG");
-    setOutputPin(Rele_SP, false, "AT_SEG");
-    setOutputPin(Rele_DP, false, "AT_SEG");
-    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "AT_SEG");
-    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "AT_SEG");
-
-    // Atualiza estados
-    estado_de = false;
-    estado_se = false;
-    estado_sa = false;
-    estado_da = false;
-    estado_sp = false;
-    estado_dp = false;
-    estado_trend_sobe = false;
-    estado_trend_desce = false;
-
-    faz_bt_seg = 0;
-    cont = 0;
-    cont13 = 0;
   }
+  desligaTodosReles("AT_SEG");
   delay(100);
 }
 
