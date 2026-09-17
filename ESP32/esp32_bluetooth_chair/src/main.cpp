@@ -2076,6 +2076,15 @@ static const char* relayLabelByPin(int pin) {
 #define RELE_DP_ACTIVE_LOW 0
 #endif
 
+static bool releLigado(int pin) {
+  if (pin < 0) return false;
+  int v = digitalRead(pin);
+  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
+    return v == LOW;
+  }
+  return v == HIGH;
+}
+
 static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
   int newValue = on ? HIGH : LOW;
   if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
@@ -4211,7 +4220,7 @@ void atualizaHorimetro() {
   // Verifica se algum motor está ligado (HIGH = ligado)
   bool algumMotorLigado = (digitalRead(Rele_SA) == HIGH) || (digitalRead(Rele_DA) == HIGH) ||
                           (digitalRead(Rele_SE) == HIGH) || (digitalRead(Rele_DE) == HIGH) ||
-                          (digitalRead(Rele_SP) == HIGH) || (digitalRead(Rele_DP) == HIGH) ||
+                          (digitalRead(Rele_SP) == HIGH) || releLigado(Rele_DP) ||
                           (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) ||
                           (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH);
   
@@ -5045,7 +5054,7 @@ void contagem_tempo_incoder_virtual() {
   bool dir_asento_up = (digitalRead(Rele_SA) == HIGH);
   bool dir_asento_down = (digitalRead(Rele_DA) == HIGH);
   bool dir_perneira_up = (digitalRead(Rele_SP) == HIGH);
-  bool dir_perneira_down = (digitalRead(Rele_DP) == HIGH);
+  bool dir_perneira_down = releLigado(Rele_DP);
 
   uint32_t d_encosto = pulses_encosto - last_pulses_encosto;
   uint32_t d_asento = pulses_assento - last_pulses_assento;
@@ -5176,7 +5185,7 @@ const unsigned long TIMEOUT_RELE = 30000; // 30 segundos
 void monitora_tempo_rele() {
   if (isGavetaAberta()) {
     bool spOn = (digitalRead(Rele_SP) == HIGH);
-    bool dpOn = (digitalRead(Rele_DP) == HIGH);
+    bool dpOn = releLigado(Rele_DP);
     if (spOn || dpOn) {
       Serial.println("[GAVETA] Aberta - desligando perneira");
       setOutputPin(Rele_SP, false, "GAVETA");
@@ -5194,7 +5203,7 @@ void monitora_tempo_rele() {
                          digitalRead(Rele_SA) == HIGH || 
                          digitalRead(Rele_DA) == HIGH || 
                          digitalRead(Rele_SP) == HIGH || 
-                         digitalRead(Rele_DP) == HIGH || 
+                         releLigado(Rele_DP) || 
                          digitalRead(Rele_DE) == HIGH ||
                          (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) ||
                          (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH));
