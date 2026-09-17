@@ -107,11 +107,20 @@ O dispositivo aparece como **"CadeiraOdonto-XXXX"** no pareamento (XXXX = últim
 2. Adicione o suporte ao ESP32:
    - Vá em `Arquivo > Preferências`
    - Em "URLs Adicionais", adicione: `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
+   - Instale `esp32 by Espressif` versão **2.0.17** (mesma do PlatformIO)
 3. Instale as bibliotecas:
-   - WiFiManager by tzapu
-   - ArduinoJson by Benoit Blanchon
-4. Selecione a placa: `Ferramentas > Placa > ESP32 Dev Module`
-5. Faça o upload do código
+   - WiFiManager by tzapu (2.0.17)
+   - ArduinoJson by Benoit Blanchon (6.x)
+   - PubSubClient by Nick O'Leary (2.8)
+4. Abra o sketch `ESP32/arduino/esp32_bluetooth_chair_s3/esp32_bluetooth_chair_s3.ino`
+   (ele já contém os defines de pinos do env `esp32s3`; o código fica em `firmware.h`,
+   gerado a partir de `src/main.cpp` por `ESP32/arduino/sync_arduino_sketch.sh`)
+5. Selecione a placa `Ferramentas > Placa > ESP32S3 Dev Module` e configure:
+   - Flash Size: 16MB (128Mb)
+   - Partition Scheme: 16M Flash (3MB APP/9.9MB FATFS)
+   - PSRAM: conforme o módulo (OPI PSRAM ou Disabled)
+   - USB CDC On Boot: Enabled (se usar a USB nativa)
+6. Faça o upload do código
 
 ## Configuração WiFi
 

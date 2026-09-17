@@ -1,3 +1,6 @@
+// GERADO AUTOMATICAMENTE por sync_arduino_sketch.sh a partir de ESP32/esp32_bluetooth_chair/src/main.cpp
+// Nao edite este arquivo; edite o main.cpp e rode o script novamente.
+#pragma once
 /*
   ========================================================
   CADEIRA ODONTOLÃ“GICA - ESP32
