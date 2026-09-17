@@ -15,6 +15,9 @@
 // O código-fonte fica em firmware.h (cópia de ../../esp32_bluetooth_chair/src/main.cpp).
 // Para sincronizar após editar o main.cpp: execute ../sync_arduino_sketch.sh
 
+// 1 = testes de bancada: sem BLE/WiFi/MQTT/Supabase/OTA (comandos pelo Monitor Serial). 0 = firmware completo.
+#define OFFLINE_MODE 1
+
 #define I2C_EARLY_TEST 0
 #define I2C_SDA 2
 #define I2C_SCL 18

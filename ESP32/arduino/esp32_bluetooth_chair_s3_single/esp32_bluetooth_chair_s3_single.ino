@@ -16,6 +16,9 @@
 // O código-fonte fica em firmware.h (cópia de ../../esp32_bluetooth_chair/src/main.cpp).
 // Para sincronizar após editar o main.cpp: execute ../sync_arduino_sketch.sh
 
+// 1 = testes de bancada: sem BLE/WiFi/MQTT/Supabase/OTA (comandos pelo Monitor Serial). 0 = firmware completo.
+#define OFFLINE_MODE 1
+
 #define I2C_EARLY_TEST 0
 #define I2C_SDA 2
 #define I2C_SCL 18
@@ -80,7 +83,12 @@
 #include <esp_idf_version.h>
 #include <esp_task_wdt.h>
 
-#if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(ARDUINO_ESP32S2_DEV) || defined(ARDUINO_ESP32S2)
+// OFFLINE_MODE=1: desliga BLE, WiFi, MQTT, Supabase, NTP e OTA; so botoes/reles/encoders + comandos via Serial.
+#ifndef OFFLINE_MODE
+#define OFFLINE_MODE 0
+#endif
+
+#if OFFLINE_MODE || defined(CONFIG_IDF_TARGET_ESP32S2) || defined(ARDUINO_ESP32S2_DEV) || defined(ARDUINO_ESP32S2)
 #define HAS_BLE 0
 #else
 #define HAS_BLE 1
@@ -2533,6 +2541,25 @@ void setup() {
   return;
 #endif
 
+#if OFFLINE_MODE
+  Serial.println("Inicio programa cadeira GO - MODO OFFLINE (sem BLE/WiFi/MQTT/Supabase/OTA)");
+  Serial.println("Carregando preferencias...");
+  carregaPreferencias();
+  delay(500);
+  setCpuFrequencyMhz(240);
+  Serial.println("Comandos via Serial (115200): SE DE SA DA SP DP STOP VZ PT M1 STATUS I2C_SCAN PCF8574_BTNS GPIO_BTNS");
+  executa_vz_ini();
+  Serial.println("\n====================================");
+  Serial.println("   SISTEMA PRONTO (OFFLINE)!");
+  Serial.println("====================================");
+  Serial.print("Serial: ");
+  Serial.println(NUMERO_SERIE_CADEIRA);
+  Serial.print("Memoria livre: ");
+  Serial.print(ESP.getFreeHeap());
+  Serial.println(" bytes");
+  return;
+#endif
+
   Serial.println("Inicio programa cadeira GO - Com WiFiManager + Supabase");
 
   // Carrega dados salvos (encoder virtual e horÃ­metro)
@@ -2957,14 +2984,17 @@ void loop() {
     return;
   }
   
+#if !OFFLINE_MODE
   // Verifica se botÃ£o de reset WiFi foi pressionado por 5 segundos
   verificaBotaoResetWifi();
+#endif
   
   // Verifica timeout dos motores (dead man's switch)
   verificaTimeoutMotores();
   
   // Processa comandos Bluetooth do app
   processaComandosBluetooth();
+#if !OFFLINE_MODE
   if (mqttCommandQueue) {
     MqttCmdItem item;
     while (xQueueReceive(mqttCommandQueue, &item, 0) == pdTRUE) {
@@ -2975,6 +3005,7 @@ void loop() {
       }
     }
   }
+#endif
   trendTickInputs();
   trendDebugTick();
 
@@ -2984,12 +3015,14 @@ void loop() {
   // Atualiza horÃ­metro
   atualizaHorimetro();
 
+#if !OFFLINE_MODE
   // Envia dados ao Supabase periodicamente
   atualizaSupabase();
   sendMotorTravelToSupabaseIfNeeded();
 
   // Verifica status da cadeira periodicamente
   verificacaoPeriodicaStatus();
+#endif
 
   // FunÃ§Ãµes originais de controle
   contagem_tempo_incoder_virtual();
@@ -3000,12 +3033,14 @@ void loop() {
   Button_Seg();
   Button_geral();
   monitora_tempo_rele();
+#if !OFFLINE_MODE
   if (mqttStatusDirty && mqttClient.connected() && (millis() - mqttLastStatusPublishMs) > 250) {
     mqttStatusDirty = false;
     mqttLastStatusPublishMs = millis();
     publicaStatusMQTT();
   }
   otaTick();
+#endif
 
 #if HAS_BLE
   bleAtualizaDisponibilidade();
