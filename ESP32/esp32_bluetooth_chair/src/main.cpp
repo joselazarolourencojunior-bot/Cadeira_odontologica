@@ -1,3 +1,55 @@
+// ARQUIVO UNICO gerado por sync_arduino_sketch.sh - copie/cole inteiro na Arduino IDE.
+// Sketch Arduino IDE para ESP32-S3 (equivalente ao env "esp32s3" do platformio.ini).
+//
+// Placa: ESP32S3 Dev Module
+//   Flash Size: 16MB (128Mb)
+//   Partition Scheme: 16M Flash (3MB APP/9.9MB FATFS)  (ou "Custom" com partitions.csv desta pasta)
+//   PSRAM: OPI PSRAM (ou Disabled, conforme o módulo)
+//   USB CDC On Boot: Enabled (se gravar/monitorar pela USB nativa)
+//   Upload Speed: 921600
+//
+// Bibliotecas (Gerenciador de Bibliotecas):
+//   WiFiManager (tzapu) >= 2.0.17
+//   ArduinoJson (Benoit Blanchon) 6.x
+//   PubSubClient (Nick O'Leary) >= 2.8
+//
+// O código-fonte fica em firmware.h (cópia de ../../esp32_bluetooth_chair/src/main.cpp).
+// Para sincronizar após editar o main.cpp: execute ../sync_arduino_sketch.sh
+
+// 1 = testes de bancada: sem BLE/WiFi/MQTT/Supabase/OTA (comandos pelo Monitor Serial). 0 = firmware completo.
+#define OFFLINE_MODE 1
+
+#define I2C_EARLY_TEST 0
+#define I2C_SDA 2
+#define I2C_SCL 18
+#define I2C_CLOCK_HZ 100000
+#define PCF8574_INT_PIN 1
+#define PIN_RF 15
+#define PIN_SA 14
+#define PIN_GAVETA 20
+#define PIN_TREN_INT_DESCE 8   // PCI: entrada INT_TREND-D chega no GPIO8 -> aciona DESCE
+#define PIN_INT_TREND_DESCE 39 // PCI: entrada INT_TREND-S chega no GPIO39 -> aciona SOBE
+#define PORTS_ONLY 0
+#define PORTS_VERIFY 0
+#define TEST_MODE 0
+#define PIN_ENCODER1 4
+#define PIN_ENCODER2 17
+#define PIN_ENCODER3 19
+#define PIN_RELE_SA 16
+#define PIN_RELE_DA 9
+#define PIN_RELE_SE 5
+#define PIN_RELE_DE 6
+#define PIN_RELE_SP 7
+#define PIN_RELE_DP 10
+#define RELE_DP_ACTIVE_LOW 0
+#define PIN_RELE_REFLETOR 11
+#define PIN_RELE_TREND_DESCE 48
+#define PIN_RELE_TREND_SOBE 47
+#define PIN_LED 12
+#define PIN_BUZZER 13
+
+
+// ===================== firmware (ESP32/esp32_bluetooth_chair/src/main.cpp) =====================
 /*
   ========================================================
   CADEIRA ODONTOLÃ“GICA - ESP32
@@ -31,7 +83,12 @@
 #include <esp_idf_version.h>
 #include <esp_task_wdt.h>
 
-#if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(ARDUINO_ESP32S2_DEV) || defined(ARDUINO_ESP32S2)
+// OFFLINE_MODE=1: desliga BLE, WiFi, MQTT, Supabase, NTP e OTA; so botoes/reles/encoders + comandos via Serial.
+#ifndef OFFLINE_MODE
+#define OFFLINE_MODE 0
+#endif
+
+#if OFFLINE_MODE
 #define HAS_BLE 0
 #else
 #define HAS_BLE 1
@@ -55,27 +112,27 @@ static const int IO_PCF_BASE = 100;
 #endif
 
 #ifndef PCF8574_INT_PIN
-#define PCF8574_INT_PIN -1
+#define PCF8574_INT_PIN 1
 #endif
 
 #ifndef PIN_SA
-#define PIN_SA 34
+#define PIN_SA 14
 #endif
 
 #ifndef PIN_RF
-#define PIN_RF 23
+#define PIN_RF 15
 #endif
 
 #ifndef PIN_GAVETA
-#define PIN_GAVETA -1
+#define PIN_GAVETA 20
 #endif
 
 #ifndef PIN_TREN_INT_DESCE
-#define PIN_TREN_INT_DESCE -1
+#define PIN_TREN_INT_DESCE 3
 #endif
 
 #ifndef PIN_INT_TREND_DESCE
-#define PIN_INT_TREND_DESCE -1
+#define PIN_INT_TREND_DESCE 8
 #endif
 
 #ifndef PIN_TREN_INT_SOBE
@@ -87,19 +144,27 @@ static const int IO_PCF_BASE = 100;
 #endif
 
 #ifndef PIN_ENCODER1
-#define PIN_ENCODER1 -1
+#define PIN_ENCODER1 4
 #endif
 
 #ifndef PIN_ENCODER2
-#define PIN_ENCODER2 -1
+#define PIN_ENCODER2 17
 #endif
 
 #ifndef PIN_ENCODER3
-#define PIN_ENCODER3 -1
+#define PIN_ENCODER3 19
 #endif
 
 #ifndef PIN_ENCODER_TREND
 #define PIN_ENCODER_TREND 46
+#endif
+
+#ifndef I2C_SDA
+#define I2C_SDA 2
+#endif
+
+#ifndef I2C_SCL
+#define I2C_SCL 18
 #endif
 
 #ifndef I2C_EARLY_TEST
@@ -545,6 +610,10 @@ typedef struct {
   int size;
 } OtaInfo;
 
+static bool otaParseManifestJson(const String& body, OtaInfo& out);
+static bool otaFetchManifest(OtaInfo& out);
+static bool otaDownloadAndUpdate(const OtaInfo& info);
+
 static inline bool mqttLockMs(uint32_t ms) {
   if (!mqttMutex) {
     return true;
@@ -715,6 +784,7 @@ void executa_vz_ini();
 void executa_M1();
 void executa_pt();
 void AT_SEG();
+void desligaTodosReles(const char* src);
 void bip();
 void bipLong();
 void enviarBLE(String msg);
@@ -1167,6 +1237,7 @@ void reconnectMQTT() {
     }
     mqttClient.setSocketTimeout(5);
     mqttClient.setKeepAlive(30);
+    mqttClient.setBufferSize(1024);
 
     mqttClient.setServer(mqttHost.c_str(), mqttPort);
     if (WiFi.status() == WL_CONNECTED) {
@@ -1614,12 +1685,13 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
 class MyCallbacks: public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) {
-    std::string rxValue = pCharacteristic->getValue();
-    
-    if (rxValue.length() > 0) {
+    const uint8_t* rxData = pCharacteristic->getData();
+    size_t rxLen = pCharacteristic->getLength();
+
+    if (rxLen > 0) {
       comandoBLE = "";
-      for (int i = 0; i < rxValue.length(); i++) {
-        comandoBLE += rxValue[i];
+      for (size_t i = 0; i < rxLen; i++) {
+        comandoBLE += (char)rxData[i];
       }
       comandoBLE.trim();
       Serial.print("[BLE] Comando recebido: ");
@@ -1867,37 +1939,37 @@ static void applyMqttRuntimeConfig() {
 
 // Constantes - Pinos de SAÃDA (relÃ©s e indicadores)
 #ifndef PIN_RELE_SA
-#define PIN_RELE_SA 33
+#define PIN_RELE_SA 16
 #endif
 #ifndef PIN_RELE_DA
-#define PIN_RELE_DA 25
+#define PIN_RELE_DA 9
 #endif
 #ifndef PIN_RELE_SE
-#define PIN_RELE_SE 27
+#define PIN_RELE_SE 5
 #endif
 #ifndef PIN_RELE_DE
-#define PIN_RELE_DE 26
+#define PIN_RELE_DE 6
 #endif
 #ifndef PIN_RELE_SP
-#define PIN_RELE_SP 12
+#define PIN_RELE_SP 7
 #endif
 #ifndef PIN_RELE_DP
-#define PIN_RELE_DP 14
+#define PIN_RELE_DP 10
 #endif
 #ifndef PIN_RELE_REFLETOR
-#define PIN_RELE_REFLETOR 4
+#define PIN_RELE_REFLETOR 11
 #endif
 #ifndef PIN_RELE_TREND_DESCE
-#define PIN_RELE_TREND_DESCE -1
+#define PIN_RELE_TREND_DESCE 48
 #endif
 #ifndef PIN_RELE_TREND_SOBE
-#define PIN_RELE_TREND_SOBE -1
+#define PIN_RELE_TREND_SOBE 47
 #endif
 #ifndef PIN_LED
-#define PIN_LED 2
+#define PIN_LED 12
 #endif
 #ifndef PIN_BUZZER
-#define PIN_BUZZER 32
+#define PIN_BUZZER 13
 #endif
 
 const int Rele_SA = PIN_RELE_SA;
@@ -1988,6 +2060,9 @@ static void beepSeqTick() {
 
 static void alarmTick() {
   if (!audibleErrorBeeps) return;
+#if OFFLINE_MODE
+  return;  // Alarmes de rede (WiFi/MQTT/Supabase) desabilitados em modo offline
+#endif
   if (beepSeqActive) return;
   if (buzzerTestEnabled) return;
   uint32_t now = millis();
@@ -2057,6 +2132,15 @@ static const char* relayLabelByPin(int pin) {
 #define RELE_DP_ACTIVE_LOW 0
 #endif
 
+static bool releLigado(int pin) {
+  if (pin < 0) return false;
+  int v = digitalRead(pin);
+  if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
+    return v == LOW;
+  }
+  return v == HIGH;
+}
+
 static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
   int newValue = on ? HIGH : LOW;
   if (pin == Rele_DP && RELE_DP_ACTIVE_LOW) {
@@ -2071,6 +2155,20 @@ static void setOutputPin(int pin, bool on, const char* src, bool log = true) {
   if (pin == Rele_SA || pin == Rele_DA || pin == Rele_SE || pin == Rele_DE || pin == Rele_SP || pin == Rele_DP || pin == Rele_refletor || pin == Rele_TREND_SOBE || pin == Rele_TREND_DESCE) {
     mqttStatusDirty = true;
   }
+  
+  // [DEBUG] Detecta falha de escrita no pino (problema de hardware)
+  if (readBack != newValue) {
+    Serial.print("[ERRO_GPIO] FALHA ao escrever no pino ");
+    Serial.print(relayLabelByPin(pin));
+    Serial.print("(GPIO");
+    Serial.print(pin);
+    Serial.print(") - Esperado=");
+    Serial.print(newValue);
+    Serial.print(" Lido=");
+    Serial.println(readBack);
+    Serial.println("[ERRO_GPIO] Possivel curto-circuito ou pino danificado!");
+  }
+  
   if (!log) {
     return;
   }
@@ -2265,23 +2363,40 @@ void monitoraSistema();
 // ========== SETUP ==========
 void setup() {
   bootStartedAtMs = millis();
+  Serial.println("\n\n========================================");
+  Serial.println("  INICIANDO SETUP - CADEIRA ODONTOLOGICA");
+  Serial.println("========================================");
+  Serial.print("[DEBUG] Versao do firmware: ");
+  Serial.println(FIRMWARE_VERSION);
+  Serial.print("[DEBUG] Tempo desde boot: ");
+  Serial.print(bootStartedAtMs);
+  Serial.println(" ms");
+  
   // WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // Desabilita detector de Brownout - not needed in Arduino
   setCpuFrequencyMhz(80); // Reduz frequÃªncia para 80MHz durante inicializaÃ§Ã£o
+  Serial.println("[DEBUG] CPU configurado para 80MHz (reduzido para inicializacao)");
   
   Serial.begin(115200);
   delay(2000);
+  Serial.println("[DEBUG] Serial iniciado em 115200 baud");
 
 #if ESP_IDF_VERSION_MAJOR >= 5
+  Serial.println("[DEBUG] Desabilitando watchdog anterior...");
   esp_task_wdt_deinit();
+  Serial.println("[DEBUG] Configurando watchdog com timeout de 120 segundos...");
   esp_task_wdt_config_t twdt_config = {
       .timeout_ms = 120000,
       .idle_core_mask = (1 << 0) | (1 << 1),
       .trigger_panic = true,
   };
   esp_task_wdt_init(&twdt_config);
+  Serial.println("[DEBUG] Watchdog configurado (IDF v5+)");
 #else
+  Serial.println("[DEBUG] Desabilitando watchdog anterior...");
   esp_task_wdt_deinit();
+  Serial.println("[DEBUG] Configurando watchdog com timeout de 120 segundos...");
   esp_task_wdt_init(120, true);
+  Serial.println("[DEBUG] Watchdog configurado (IDF v4)");
 #endif
 
 #if I2C_EARLY_TEST
@@ -2319,18 +2434,22 @@ void setup() {
   }
 #endif
   
-  Serial.println("\n--- INICIALIZANDO SISTEMA ---");
-  Serial.print("CPU0 Reset Reason: "); Serial.println(esp_reset_reason());
-  Serial.print("CPU1 Reset Reason: "); Serial.println(esp_reset_reason());
+  Serial.println("\n========================================");
+  Serial.println("  INICIALIZANDO SISTEMA");
+  Serial.println("========================================");
+  Serial.print("[DEBUG] CPU0 Reset Reason: "); Serial.println(esp_reset_reason());
+  Serial.print("[DEBUG] CPU1 Reset Reason: "); Serial.println(esp_reset_reason());
   
   // Gera nÃºmero de sÃ©rie Ãºnico baseado no MAC ID do ESP32
-  Serial.println("Gerando numero de serie...");
+  Serial.println("[DEBUG] Gerando numero de serie...");
   NUMERO_SERIE_CADEIRA = geraNumeroSerieDoMAC();
-  Serial.print("Numero de Serie: ");
+  Serial.print("[OK] Numero de Serie: ");
   Serial.println(NUMERO_SERIE_CADEIRA);
   
   // Define base dos tópicos MQTT
   MQTT_TOPIC_BASE = NUMERO_SERIE_CADEIRA + "/";
+  Serial.print("[DEBUG] MQTT_TOPIC_BASE definido: ");
+  Serial.println(MQTT_TOPIC_BASE);
   loadMqttPreferences();
   applyMqttRuntimeConfig();
   
@@ -2340,14 +2459,15 @@ void setup() {
   char nomeTemp[20];
   snprintf(nomeTemp, sizeof(nomeTemp), "CadeiraOdonto-%02X%02X", mac[4], mac[5]);
   NOME_DISPOSITIVO = String(nomeTemp);
-  Serial.print("Nome do Dispositivo: ");
+  Serial.print("[OK] Nome do Dispositivo: ");
   Serial.println(NOME_DISPOSITIVO);
   delay(500);
 
+  Serial.println("[DEBUG] Inicializando IO/I2C/PCF8574...");
   IO_begin();
   
   // ConfiguraÃ§Ã£o de pinos primeiro (menor consumo)
-  Serial.println("Configurando pinos GPIO...");
+  Serial.println("[DEBUG] Configurando pinos GPIO...");
 
   // Inicializa pinos de entrada com pull-up
   loadGavetaPinPreference();
@@ -2394,51 +2514,115 @@ void setup() {
     Serial.println("[GAVETA] DESABILITADO");
   }
   pinMode(ENCODER1, INPUT_PULLUP);
+  Serial.print("[DEBUG] ENCODER1 configurado (GPIO");
+  Serial.print(ENCODER1);
+  Serial.println(")");
+  
   pinMode(ENCODER2, INPUT_PULLUP);
+  Serial.print("[DEBUG] ENCODER2 configurado (GPIO");
+  Serial.print(ENCODER2);
+  Serial.println(")");
+  
   pinMode(ENCODER3, INPUT_PULLUP);
+  Serial.print("[DEBUG] ENCODER3 configurado (GPIO");
+  Serial.print(ENCODER3);
+  Serial.println(")");
+  
   if (ENCODER_TREND >= 0) {
     pinMode(ENCODER_TREND, INPUT_PULLUP);
+    Serial.print("[DEBUG] ENCODER_TREND configurado (GPIO");
+    Serial.print(ENCODER_TREND);
+    Serial.println(")");
   }
+  
   if (TEST_MODE) {
     Serial.println("[ENC] TEST_MODE=1: interrupcoes de encoder desabilitadas");
   } else {
+    Serial.println("[DEBUG] Anexando interrupcoes de encoder...");
+    
     if (ENCODER1 >= 0 && ENCODER1 != I2C_SDA && ENCODER1 != I2C_SCL && ENCODER1 != Rele_refletor) {
       attachInterrupt(digitalPinToInterrupt(ENCODER1), isr_encoder1, FALLING);
+      Serial.println("[OK] Interrupcao ENCODER1 anexada");
     } else {
-      Serial.println("[ENC] ENCODER1 desabilitado");
+      Serial.println("[ERRO] ENCODER1 desabilitado - conflito ou invalido");
     }
+    
     if (ENCODER2 >= 0 && ENCODER2 != I2C_SDA && ENCODER2 != I2C_SCL && ENCODER2 != Rele_refletor) {
       attachInterrupt(digitalPinToInterrupt(ENCODER2), isr_encoder2, FALLING);
+      Serial.println("[OK] Interrupcao ENCODER2 anexada");
     } else {
-      Serial.println("[ENC] ENCODER2 desabilitado");
+      Serial.println("[ERRO] ENCODER2 desabilitado - conflito ou invalido");
     }
+    
     if (ENCODER3 >= 0 && ENCODER3 != I2C_SDA && ENCODER3 != I2C_SCL && ENCODER3 != Rele_refletor) {
       attachInterrupt(digitalPinToInterrupt(ENCODER3), isr_encoder3, FALLING);
+      Serial.println("[OK] Interrupcao ENCODER3 anexada");
     } else {
-      Serial.println("[ENC] ENCODER3 desabilitado");
+      Serial.println("[ERRO] ENCODER3 desabilitado - conflito ou invalido");
     }
+    
     if (ENCODER_TREND >= 0 && ENCODER_TREND != I2C_SDA && ENCODER_TREND != I2C_SCL && ENCODER_TREND != Rele_refletor) {
       attachInterrupt(digitalPinToInterrupt(ENCODER_TREND), isr_encoder_trend, FALLING);
+      Serial.println("[OK] Interrupcao ENCODER_TREND anexada");
     } else {
-      Serial.println("[ENC] ENCODER_TREND desabilitado");
+      Serial.println("[ERRO] ENCODER_TREND desabilitado - conflito ou invalido");
     }
   }
 
   // Inicializa pinos de saÃ­da
+  Serial.println("[DEBUG] Configurando pinos de saida (reles)...");
+  
   pinMode(Rele_SA, OUTPUT);
+  Serial.print("[DEBUG] Rele_SA = GPIO");
+  Serial.println(Rele_SA);
+  
   pinMode(Rele_DA, OUTPUT);
+  Serial.print("[DEBUG] Rele_DA = GPIO");
+  Serial.println(Rele_DA);
+  
   pinMode(Rele_SE, OUTPUT);
+  Serial.print("[DEBUG] Rele_SE = GPIO");
+  Serial.println(Rele_SE);
+  
   pinMode(Rele_DE, OUTPUT);
+  Serial.print("[DEBUG] Rele_DE = GPIO");
+  Serial.println(Rele_DE);
+  
   pinMode(Rele_DP, OUTPUT);
+  Serial.print("[DEBUG] Rele_DP = GPIO");
+  Serial.println(Rele_DP);
+  
   pinMode(Rele_SP, OUTPUT);
+  Serial.print("[DEBUG] Rele_SP = GPIO");
+  Serial.println(Rele_SP);
+  
   pinMode(BUZZER, OUTPUT);
   digitalWrite(BUZZER, LOW);
+  Serial.print("[DEBUG] BUZZER = GPIO");
+  Serial.println(BUZZER);
+  
   pinMode(LED, OUTPUT);
+  Serial.print("[DEBUG] LED = GPIO");
+  Serial.println(LED);
+  
   pinMode(Rele_refletor, OUTPUT);
-  if (Rele_TREND_DESCE >= 0) pinMode(Rele_TREND_DESCE, OUTPUT);
-  if (Rele_TREND_SOBE >= 0) pinMode(Rele_TREND_SOBE, OUTPUT);
+  Serial.print("[DEBUG] Rele_refletor = GPIO");
+  Serial.println(Rele_refletor);
+  
+  if (Rele_TREND_DESCE >= 0) {
+    pinMode(Rele_TREND_DESCE, OUTPUT);
+    Serial.print("[DEBUG] Rele_TREND_DESCE = GPIO");
+    Serial.println(Rele_TREND_DESCE);
+  }
+  
+  if (Rele_TREND_SOBE >= 0) {
+    pinMode(Rele_TREND_SOBE, OUTPUT);
+    Serial.print("[DEBUG] Rele_TREND_SOBE = GPIO");
+    Serial.println(Rele_TREND_SOBE);
+  }
 
   // Desliga todos os relÃ©s no inÃ­cio
+  Serial.println("[DEBUG] Desligando todos os reles no inicio...");
   setOutputPin(Rele_SA, false, nullptr, false);
   setOutputPin(Rele_DA, false, nullptr, false);
   setOutputPin(Rele_SE, false, nullptr, false);
@@ -2448,7 +2632,8 @@ void setup() {
   setOutputPin(Rele_refletor, false, nullptr, false);
   if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, nullptr, false);
   if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, nullptr, false);
-  Serial.println("Pinos configurados.");
+  Serial.println("[OK] Todos os reles desligados.");
+  Serial.println("[DEBUG] Pinos GPIO configurados com sucesso.");
   delay(500);
 
   if (RF == Rele_SA || RF == Rele_DA || RF == Rele_SE || RF == Rele_DE || RF == Rele_SP || RF == Rele_DP || RF == Rele_refletor || RF == BUZZER || RF == LED) {
@@ -2461,6 +2646,23 @@ void setup() {
   }
 
   inicializaEstadosDeBordaBotoes();
+
+  // [DIAG] Dump de todos os botoes - identifica botao preso em LOW no boot
+  Serial.println("\n[BOTOES] === ESTADO INICIAL DOS BOTOES ===");
+  Serial.print("[BOTOES] M1="); Serial.print(digitalRead(M1) ? "HIGH" : "LOW-PRESO!");
+  Serial.print(" VZ="); Serial.print(digitalRead(VZ) ? "HIGH" : "LOW-PRESO!");
+  Serial.print(" PT="); Serial.print(digitalRead(PT) ? "HIGH" : "LOW-PRESO!");
+  Serial.print(" SE="); Serial.print(digitalRead(SE) ? "HIGH" : "LOW-PRESO!");
+  Serial.print(" DE="); Serial.print(digitalRead(DE) ? "HIGH" : "LOW-PRESO!");
+  Serial.println();
+  Serial.print("[BOTOES] SA="); Serial.print(digitalRead(SA) ? "HIGH" : "LOW-PRESO!");
+  Serial.print(" DA="); Serial.print(digitalRead(DA) ? "HIGH" : "LOW-PRESO!");
+  Serial.print(" SP="); Serial.print(digitalRead(SP) ? "HIGH" : "LOW-PRESO!");
+  Serial.print(" DP="); Serial.print(digitalRead(DP) ? "HIGH" : "LOW-PRESO!");
+  Serial.print(" RF="); Serial.print(digitalRead(RF) ? "HIGH" : "LOW-PRESO!");
+  Serial.print(" GAVETA="); Serial.println(digitalRead(GAVETA) ? "HIGH" : "LOW-PRESO!");
+  Serial.println("[BOTOES] =======================================\n");
+
   loadMotorTravelPreferences();
 
 #if PORTS_ONLY
@@ -2475,6 +2677,40 @@ void setup() {
   Serial.println("Teste completo: botoes (PCF8574) -> rotinas -> reles (GPIO)");
   Serial.println("Use: PCF8574_BTNS | PCF8574_INT | GPIO_BTNS");
   bip();
+  return;
+#endif
+
+#if OFFLINE_MODE
+  Serial.println("\n========================================");
+  Serial.println("  MODO OFFLINE ATIVADO");
+  Serial.println("========================================");
+  Serial.println("[DEBUG] BLE: DESABILITADO");
+  Serial.println("[DEBUG] WiFi: DESABILITADO");
+  Serial.println("[DEBUG] MQTT: DESABILITADO");
+  Serial.println("[DEBUG] Supabase: DESABILITADO");
+  Serial.println("[DEBUG] OTA: DESABILITADO");
+  Serial.println("[DEBUG] NTP: DESABILITADO");
+  Serial.println("[DEBUG] Inicio programa cadeira GO - MODO OFFLINE");
+  Serial.println("Carregando preferencias...");
+  carregaPreferencias();
+  delay(500);
+  setCpuFrequencyMhz(240);
+  Serial.println("[DEBUG] CPU configurado para 240MHz");
+  Serial.println("[DEBUG] Comandos via Serial (115200): SE DE SA DA SP DP STOP VZ PT M1 STATUS I2C_SCAN PCF8574_BTNS GPIO_BTNS");
+  executa_vz_ini();
+  // Primeira vez: aprende o curso total (VZ -> PT contando pulsos -> volta VZ)
+  iniciaCalibracaoSeNecessario();
+  Serial.println("\n========================================");
+  Serial.println("   SISTEMA PRONTO (OFFLINE)!");
+  Serial.println("========================================");
+  Serial.print("[DEBUG] Numero de Serie: ");
+  Serial.println(NUMERO_SERIE_CADEIRA);
+  Serial.print("[DEBUG] Memoria livre: ");
+  Serial.print(ESP.getFreeHeap());
+  Serial.println(" bytes");
+  Serial.print("[DEBUG] Uptime: ");
+  Serial.print(millis());
+  Serial.println(" ms");
   return;
 #endif
 
@@ -2777,9 +3013,27 @@ static void trendTickInputs() {
 void verificaTimeoutMotores() {
   unsigned long agora = millis();
   uint32_t curTrend = pulses_trend;
+  static uint32_t lastTrendDebug = 0;
+  
+  // Debug de pulso de trend (apenas quando ativo)
+  if ((estado_trend_sobe || estado_trend_desce) && ENCODER_TREND >= 0) {
+    if (agora - lastTrendDebug > 1000) {
+      Serial.print("[DEBUG_TREND] Pulsos: ");
+      Serial.print(curTrend);
+      Serial.print(" | Ultimo pulso: ");
+      Serial.print(trendLastPulseAtMs);
+      Serial.print(" | Tempo decorrido: ");
+      Serial.print(agora - ultimoComandoTrendSobe);
+      Serial.println(" ms");
+      lastTrendDebug = agora;
+    }
+  }
+  
   if (curTrend != last_pulses_trend) {
     last_pulses_trend = curTrend;
     trendLastPulseAtMs = agora;
+    Serial.print("[TREND_PULSE] Novo pulso detectado: ");
+    Serial.println(curTrend);
   }
   
   // SE - Encosto sobe
@@ -2788,7 +3042,10 @@ void verificaTimeoutMotores() {
     setOutputPin(Rele_SE, false, "TIMEOUT");
     faz_bt_seg = 0;
     enviarBLE("SE:TIMEOUT");
-    Serial.println("[TIMEOUT] Motor SE desligado por seguranca");
+    Serial.println("[ALARME] Motor SE desligado por seguranca (timeout de 1s)");
+    Serial.print("[TIMEOUT] Ultimo comando SE ha: ");
+    Serial.print(agora - ultimoComandoSE);
+    Serial.println(" ms");
   }
   
   // DE - Encosto desce
@@ -2797,7 +3054,10 @@ void verificaTimeoutMotores() {
     setOutputPin(Rele_DE, false, "TIMEOUT");
     faz_bt_seg = 0;
     enviarBLE("DE:TIMEOUT");
-    Serial.println("[TIMEOUT] Motor DE desligado por seguranca");
+    Serial.println("[ALARME] Motor DE desligado por seguranca (timeout de 1s)");
+    Serial.print("[TIMEOUT] Ultimo comando DE ha: ");
+    Serial.print(agora - ultimoComandoDE);
+    Serial.println(" ms");
   }
   
   // SA - Assento sobe
@@ -2806,7 +3066,10 @@ void verificaTimeoutMotores() {
     setOutputPin(Rele_SA, false, "TIMEOUT");
     faz_bt_seg = 0;
     enviarBLE("SA:TIMEOUT");
-    Serial.println("[TIMEOUT] Motor SA desligado por seguranca");
+    Serial.println("[ALARME] Motor SA desligado por seguranca (timeout de 1s)");
+    Serial.print("[TIMEOUT] Ultimo comando SA ha: ");
+    Serial.print(agora - ultimoComandoSA);
+    Serial.println(" ms");
   }
   
   // DA - Assento desce
@@ -2815,7 +3078,10 @@ void verificaTimeoutMotores() {
     setOutputPin(Rele_DA, false, "TIMEOUT");
     faz_bt_seg = 0;
     enviarBLE("DA:TIMEOUT");
-    Serial.println("[TIMEOUT] Motor DA desligado por seguranca");
+    Serial.println("[ALARME] Motor DA desligado por seguranca (timeout de 1s)");
+    Serial.print("[TIMEOUT] Ultimo comando DA ha: ");
+    Serial.print(agora - ultimoComandoDA);
+    Serial.println(" ms");
   }
   
   // SP - Pernas sobem
@@ -2824,7 +3090,10 @@ void verificaTimeoutMotores() {
     setOutputPin(Rele_SP, false, "TIMEOUT");
     faz_bt_seg = 0;
     enviarBLE("SP:TIMEOUT");
-    Serial.println("[TIMEOUT] Motor SP desligado por seguranca");
+    Serial.println("[ALARME] Motor SP desligado por seguranca (timeout de 1s)");
+    Serial.print("[TIMEOUT] Ultimo comando SP ha: ");
+    Serial.print(agora - ultimoComandoSP);
+    Serial.println(" ms");
   }
   
   // DP - Pernas descem
@@ -2833,7 +3102,10 @@ void verificaTimeoutMotores() {
     setOutputPin(Rele_DP, false, "TIMEOUT");
     faz_bt_seg = 0;
     enviarBLE("DP:TIMEOUT");
-    Serial.println("[TIMEOUT] Motor DP desligado por seguranca");
+    Serial.println("[ALARME] Motor DP desligado por seguranca (timeout de 1s)");
+    Serial.print("[TIMEOUT] Ultimo comando DP ha: ");
+    Serial.print(agora - ultimoComandoDP);
+    Serial.println(" ms");
   }
 
   // TS - Trend sobe
@@ -2849,7 +3121,10 @@ void verificaTimeoutMotores() {
     if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "TIMEOUT");
     faz_bt_seg = 0;
     enviarBLE("TS:TIMEOUT");
-    Serial.println("[TIMEOUT] Motor TS desligado por seguranca");
+    Serial.println("[ALARME] Motor Trend Sobe desligado por seguranca (timeout de 1s)");
+    Serial.print("[TIMEOUT] Ultimo comando TS ha: ");
+    Serial.print(agora - ultimoComandoTrendSobe);
+    Serial.println(" ms");
   }
 
   // TD - Trend desce
@@ -2860,7 +3135,10 @@ void verificaTimeoutMotores() {
     if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "TIMEOUT");
     faz_bt_seg = 0;
     enviarBLE("TD:TIMEOUT");
-    Serial.println("[TIMEOUT] Motor TD desligado por seguranca");
+    Serial.println("[ALARME] Motor Trend Desce desligado por seguranca (timeout de 1s)");
+    Serial.print("[TIMEOUT] Ultimo comando TD ha: ");
+    Serial.print(agora - ultimoComandoTrendDesce);
+    Serial.println(" ms");
   }
 
   if ((estado_trend_sobe || estado_trend_desce) && ENCODER_TREND >= 0 && trendLastPulseAtMs > 0 && (agora - trendLastPulseAtMs) > 500) {
@@ -2870,12 +3148,29 @@ void verificaTimeoutMotores() {
     estado_trend_desce = false;
     faz_bt_seg = 0;
     enviarBLE("TREND:STALL");
-    Serial.println("[TREND_ENC] Sem pulsos. Trend desligado por seguranca");
+    Serial.println("[ERRO_TREND] Encoder sem pulsos ha 500ms. Trend desligado por seguranca");
+    Serial.print("[ERRO_TREND] Ultimo pulso foi ha: ");
+    Serial.print(agora - trendLastPulseAtMs);
+    Serial.println(" ms");
   }
 }
 
 // ========== LOOP PRINCIPAL ==========
 void loop() {
+  static uint32_t lastLoopDebugMs = 0;
+  static uint32_t loopCounter = 0;
+  
+  // Debug do loop a cada 30 segundos
+  loopCounter++;
+  if (millis() - lastLoopDebugMs > 30000) {
+    Serial.print("[LOOP] Iteracao #");
+    Serial.print(loopCounter);
+    Serial.print(" | Uptime: ");
+    Serial.print(millis() / 1000);
+    Serial.println("s");
+    lastLoopDebugMs = millis();
+  }
+
 #if PORTS_ONLY || PORTS_VERIFY
   if (pcf8574InterruptPending) {
     bool okRead = false;
@@ -2902,14 +3197,17 @@ void loop() {
     return;
   }
   
+#if !OFFLINE_MODE
   // Verifica se botÃ£o de reset WiFi foi pressionado por 5 segundos
   verificaBotaoResetWifi();
+#endif
   
   // Verifica timeout dos motores (dead man's switch)
   verificaTimeoutMotores();
   
   // Processa comandos Bluetooth do app
   processaComandosBluetooth();
+#if !OFFLINE_MODE
   if (mqttCommandQueue) {
     MqttCmdItem item;
     while (xQueueReceive(mqttCommandQueue, &item, 0) == pdTRUE) {
@@ -2920,6 +3218,7 @@ void loop() {
       }
     }
   }
+#endif
   trendTickInputs();
   trendDebugTick();
 
@@ -2929,12 +3228,14 @@ void loop() {
   // Atualiza horÃ­metro
   atualizaHorimetro();
 
+#if !OFFLINE_MODE
   // Envia dados ao Supabase periodicamente
   atualizaSupabase();
   sendMotorTravelToSupabaseIfNeeded();
 
   // Verifica status da cadeira periodicamente
   verificacaoPeriodicaStatus();
+#endif
 
   // FunÃ§Ãµes originais de controle
   contagem_tempo_incoder_virtual();
@@ -2945,12 +3246,14 @@ void loop() {
   Button_Seg();
   Button_geral();
   monitora_tempo_rele();
+#if !OFFLINE_MODE
   if (mqttStatusDirty && mqttClient.connected() && (millis() - mqttLastStatusPublishMs) > 250) {
     mqttStatusDirty = false;
     mqttLastStatusPublishMs = millis();
     publicaStatusMQTT();
   }
   otaTick();
+#endif
 
 #if HAS_BLE
   bleAtualizaDisponibilidade();
@@ -3106,22 +3409,40 @@ void executaComandoBluetooth(String cmd, const char* origin) {
   cmdRaw.trim();
   cmd = cmdRaw;
   cmd.toUpperCase();
+  
+  // [DEBUG] Log de todos os comandos recebidos
+  Serial.println("\n========== COMANDO RECEBIDO ==========");
+  Serial.print("[CMD] Origem: ");
+  Serial.println(origin ? origin : "DESCONHECIDO");
+  Serial.print("[CMD] Comando bruto: '");
+  Serial.print(cmdRaw);
+  Serial.println("'");
+  Serial.print("[CMD] Comando processado: '");
+  Serial.print(cmd);
+  Serial.println("'");
+  
   if (origin && (String(origin) == "BLE" || String(origin) == "MQTT" || String(origin) == "SERIAL")) {
     String cu = cmd;
     bool isMotorCmd = (cu == "SE" || cu == "DE" || cu == "SA" || cu == "DA" || cu == "SP" || cu == "DP");
     if (isMotorCmd || cu == "STOP" || cu == "AT_SEG") {
       ultimoComandoRemoto = millis();
+      Serial.println("[CMD] Comando de motor detectado - timeout atualizado");
     }
   }
+  
   String logCmd = cmd;
   if (cmd.startsWith("MQTT_PASS=") || cmd.startsWith("MQTT_PASS:")) {
     logCmd = "MQTT_PASS=***";
+    Serial.println("[CMD] Senha MQTT detectada (ocultada)");
   }
   if (cmd.startsWith("SUPABASE_KEY=") || cmd.startsWith("SUPABASE_KEY:")) {
     logCmd = "SUPABASE_KEY=***";
+    Serial.println("[CMD] Chave Supabase detectada (ocultada)");
   }
-  Serial.print("Comando BT recebido: ");
+  
+  Serial.print("[CMD] Executando comando: ");
   Serial.println(logCmd);
+  
   mqttPublishTxCmd(cmd, origin);
 
 #if I2C_EARLY_TEST
@@ -4165,7 +4486,7 @@ void atualizaHorimetro() {
   // Verifica se algum motor está ligado (HIGH = ligado)
   bool algumMotorLigado = (digitalRead(Rele_SA) == HIGH) || (digitalRead(Rele_DA) == HIGH) ||
                           (digitalRead(Rele_SE) == HIGH) || (digitalRead(Rele_DE) == HIGH) ||
-                          (digitalRead(Rele_SP) == HIGH) || (digitalRead(Rele_DP) == HIGH) ||
+                          (digitalRead(Rele_SP) == HIGH) || releLigado(Rele_DP) ||
                           (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) ||
                           (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH);
   
@@ -4844,10 +5165,16 @@ void bipBloqueio() {
 
 // ========== CARREGAMENTO DE PREFERÃŠNCIAS ==========
 void carregaPreferencias() {
+  Serial.println("\n[PREF] ========== CARREGANDO PREFERENCIAS ==========");
+  
   preferences.begin("cadeira", false);
   supabaseUserId = preferences.isKey("user_id") ? preferences.getString("user_id", "") : "";
   supabaseMaintenanceRequestSent = preferences.isKey("mnt_sent") ? preferences.getBool("mnt_sent", false) : false;
   preferences.end();
+  Serial.print("[PREF] Supabase User ID: ");
+  Serial.println(supabaseUserId.length() > 0 ? supabaseUserId : "(vazio)");
+  Serial.print("[PREF] Manutencao solicitada: ");
+  Serial.println(supabaseMaintenanceRequestSent ? "SIM" : "NAO");
 
   preferences.begin("supabase", false);
   supabaseUrl = preferences.isKey("url") ? preferences.getString("url", SUPABASE_URL) : String(SUPABASE_URL);
@@ -4856,6 +5183,10 @@ void carregaPreferencias() {
     supabaseKey = SUPABASE_KEY;
   }
   preferences.end();
+  Serial.print("[PREF] Supabase URL: ");
+  Serial.println(supabaseUrl.length() > 0 ? supabaseUrl : "(padrao)");
+  Serial.print("[PREF] Supabase Key: ");
+  Serial.println(supabaseKey.length() > 0 ? "(configurada)" : "(padrao)");
 
   // Carrega posiÃ§Ãµes do encoder virtual M1
   preferences.begin("encoder_encosto", false);
@@ -4869,16 +5200,18 @@ void carregaPreferencias() {
   preferences.begin("encoder_pern", false);
   incoder_virtual_perneira_M1 = preferences.getInt("encoder_perneira", 0);
   preferences.end();
+  
+  Serial.println("\n[PREF] === POSICOES MEMORIA 1 ===");
+  Serial.print("[PREF] Encoder encosto M1: ");
+  Serial.println(incoder_virtual_encosto_M1);
+  Serial.print("[PREF] Encoder assento M1: ");
+  Serial.println(incoder_virtual_asento_M1);
+  Serial.print("[PREF] Encoder perneira M1: ");
+  Serial.println(incoder_virtual_perneira_M1);
 
   // Carrega horÃ­metro
   carregaHorimetro();
-
-  Serial.print("Encoder encosto M1: ");
-  Serial.println(incoder_virtual_encosto_M1);
-  Serial.print("Encoder assento M1: ");
-  Serial.println(incoder_virtual_asento_M1);
-  Serial.print("Encoder perneira M1: ");
-  Serial.println(incoder_virtual_perneira_M1);
+  Serial.println("[PREF] ============================================\n");
 }
 
 // ========== EXECUÃ‡ÃƒO M1 VIA BLUETOOTH (sem esperar botÃ£o fÃ­sico) ==========
@@ -4999,7 +5332,47 @@ void contagem_tempo_incoder_virtual() {
   bool dir_asento_up = (digitalRead(Rele_SA) == HIGH);
   bool dir_asento_down = (digitalRead(Rele_DA) == HIGH);
   bool dir_perneira_up = (digitalRead(Rele_SP) == HIGH);
-  bool dir_perneira_down = (digitalRead(Rele_DP) == HIGH);
+  bool dir_perneira_down = releLigado(Rele_DP);
+
+  // [DEBUG] Deteccao de motor travado / encoder com defeito:
+  // Se um rele de motor esta ligado ha mais de 2s e nenhum pulso chegou, algo esta errado
+  static uint32_t motorSemPulsoDesde[3] = {0, 0, 0}; // 0=encosto, 1=assento, 2=perneira
+  static bool stallAlertado[3] = {false, false, false};
+  uint32_t agoraEnc = millis();
+
+  bool encostoAtivo = dir_encosto_up || dir_encosto_down;
+  bool assentoAtivo = dir_asento_up || dir_asento_down;
+  bool perneiraAtivo = dir_perneira_up || dir_perneira_down;
+
+  // Encosto
+  if (encostoAtivo) {
+    if (motorSemPulsoDesde[0] == 0) motorSemPulsoDesde[0] = agoraEnc;
+    else if ((agoraEnc - motorSemPulsoDesde[0]) > 2000 && !stallAlertado[0]) {
+      stallAlertado[0] = true;
+      Serial.println("[ERRO_ENC] ALARME: Rele do ENCOSTO ligado ha 2s SEM pulsos do encoder!");
+      Serial.println("[ERRO_ENC] Possivel: motor travado, encoder desconectado/quebrado ou fim de curso fisico");
+    }
+  } else { motorSemPulsoDesde[0] = 0; stallAlertado[0] = false; }
+
+  // Assento
+  if (assentoAtivo) {
+    if (motorSemPulsoDesde[1] == 0) motorSemPulsoDesde[1] = agoraEnc;
+    else if ((agoraEnc - motorSemPulsoDesde[1]) > 2000 && !stallAlertado[1]) {
+      stallAlertado[1] = true;
+      Serial.println("[ERRO_ENC] ALARME: Rele do ASSENTO ligado ha 2s SEM pulsos do encoder!");
+      Serial.println("[ERRO_ENC] Possivel: motor travado, encoder desconectado/quebrado ou fim de curso fisico");
+    }
+  } else { motorSemPulsoDesde[1] = 0; stallAlertado[1] = false; }
+
+  // Perneira
+  if (perneiraAtivo) {
+    if (motorSemPulsoDesde[2] == 0) motorSemPulsoDesde[2] = agoraEnc;
+    else if ((agoraEnc - motorSemPulsoDesde[2]) > 2000 && !stallAlertado[2]) {
+      stallAlertado[2] = true;
+      Serial.println("[ERRO_ENC] ALARME: Rele da PERNEIRA ligado ha 2s SEM pulsos do encoder!");
+      Serial.println("[ERRO_ENC] Possivel: motor travado, encoder desconectado/quebrado ou fim de curso fisico");
+    }
+  } else { motorSemPulsoDesde[2] = 0; stallAlertado[2] = false; }
 
   uint32_t d_encosto = pulses_encosto - last_pulses_encosto;
   uint32_t d_asento = pulses_assento - last_pulses_assento;
@@ -5009,6 +5382,11 @@ void contagem_tempo_incoder_virtual() {
   last_pulses_assento = pulses_assento;
   last_pulses_perneira = pulses_perneira;
   last_pulses_trend_travel = pulses_trend;
+
+  // Zera o timer de stall quando pulsos chegam (motor funcionando normalmente)
+  if (d_encosto > 0) { motorSemPulsoDesde[0] = 0; stallAlertado[0] = false; }
+  if (d_asento > 0) { motorSemPulsoDesde[1] = 0; stallAlertado[1] = false; }
+  if (d_perneira > 0) { motorSemPulsoDesde[2] = 0; stallAlertado[2] = false; }
 
   if (d_encosto) {
     motorTravelPulsesEncosto += d_encosto;
@@ -5130,9 +5508,9 @@ const unsigned long TIMEOUT_RELE = 30000; // 30 segundos
 void monitora_tempo_rele() {
   if (isGavetaAberta()) {
     bool spOn = (digitalRead(Rele_SP) == HIGH);
-    bool dpOn = (digitalRead(Rele_DP) == HIGH);
+    bool dpOn = releLigado(Rele_DP);
     if (spOn || dpOn) {
-      Serial.println("[GAVETA] Aberta - desligando perneira");
+      Serial.println("[ALARME_GAVETA] Gaveta aberta detectada - desligando perneira por seguranca");
       setOutputPin(Rele_SP, false, "GAVETA");
       setOutputPin(Rele_DP, false, "GAVETA");
       estado_sp = false;
@@ -5148,7 +5526,7 @@ void monitora_tempo_rele() {
                          digitalRead(Rele_SA) == HIGH || 
                          digitalRead(Rele_DA) == HIGH || 
                          digitalRead(Rele_SP) == HIGH || 
-                         digitalRead(Rele_DP) == HIGH || 
+                         releLigado(Rele_DP) || 
                          digitalRead(Rele_DE) == HIGH ||
                          (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) ||
                          (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH));
@@ -5156,12 +5534,28 @@ void monitora_tempo_rele() {
   if (algumReleAtivo) {
     if (inicioAtivacaoRele == 0) {
       inicioAtivacaoRele = millis();
+      Serial.println("[RELE] Motor(s) ativado(s) - iniciando contagem de timeout (30s)");
     } else if (millis() - inicioAtivacaoRele >= TIMEOUT_RELE) {
-      Serial.println("!!! TIMEOUT DE SEGURANÃ‡A - RELÃ‰ ATIVO POR 30s !!!");
-      AT_SEG();
+      Serial.println("\n[ALARME] ========== TIMEOUT DE SEGURANCA ==========");
+      Serial.print("[ALARME] Rele ativo por ");
+      Serial.print(TIMEOUT_RELE / 1000);
+      Serial.println("s! Desligando todos:");
+      if (digitalRead(Rele_SE) == HIGH) Serial.println("[ALARME]   - SE (Encosto Sobe) ATIVO");
+      if (digitalRead(Rele_SA) == HIGH) Serial.println("[ALARME]   - SA (Assento Sobe) ATIVO");
+      if (digitalRead(Rele_DA) == HIGH) Serial.println("[ALARME]   - DA (Assento Desce) ATIVO");
+      if (digitalRead(Rele_SP) == HIGH) Serial.println("[ALARME]   - SP (Perneira Sobe) ATIVO");
+      if (releLigado(Rele_DP)) Serial.println("[ALARME]   - DP (Perneira Desce) ATIVO");
+      if (digitalRead(Rele_DE) == HIGH) Serial.println("[ALARME]   - DE (Encosto Desce) ATIVO");
+      if (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH) Serial.println("[ALARME]   - TREND_SOBE ATIVO");
+      if (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH) Serial.println("[ALARME]   - TREND_DESCE ATIVO");
+      Serial.println("[ALARME] ==========================================\n");
+      desligaTodosReles("TIMEOUT_RELE");
       inicioAtivacaoRele = 0;
     }
   } else {
+    if (inicioAtivacaoRele != 0) {
+      Serial.println("[RELE] Todos os motores parados - contagem de timeout zerada");
+    }
     inicioAtivacaoRele = 0;
   }
 }
@@ -5587,6 +5981,12 @@ void executaCalibracao() {
     trava_bt_DA = false;
     trava_bt_DP = false;
     Serial.println("[OK] Calibracao concluida e salva.");
+
+    // Retorna para VZ e fica aguardando comandos
+    Serial.println("[CAL] Retornando para posicao VZ...");
+    cont = 1;
+    executa_vz();
+    Serial.println("[CAL] Aprendizado finalizado - aguardando comandos.");
   }
 }
 
@@ -5809,11 +6209,25 @@ void executa_pt() {
   Serial.println("Executando PT");
   faz_bt_seg = 1;
 
+  // Se o aprendizado ja foi feito, cada eixo para ao atingir o limite salvo.
+  // Se nao ha limite gravado (fim_*_encoder == 0), o eixo roda ate o tempo maximo.
+  bool ptEncDone = (fim_encosto_encoder <= 0);
+  bool ptAssDone = (fim_asento_encoder <= 0);
+  bool ptPerDone = (fim_perneira_encoder <= 0);
+  if (!ptEncDone || !ptAssDone || !ptPerDone) {
+    Serial.println("[PT] Limites aprendidos ativos - motores param ao atingir o maximo");
+    Serial.print("[PT] Encosto max="); Serial.print(fim_encosto_encoder);
+    Serial.print(" Assento max="); Serial.print(fim_asento_encoder);
+    Serial.print(" Perneira max="); Serial.println(fim_perneira_encoder);
+  } else {
+    Serial.println("[PT] Sem memoria de curso - executando por tempo (15s)");
+  }
+
   while (cont13 == 1) {
     Watch_Dog();
     buzzerTestTick();
     delay(1);
-    
+
     // Verifica parada via BLE
     if (comandoBLE.length() > 0) {
       String cmd = comandoBLE;
@@ -5828,11 +6242,44 @@ void executa_pt() {
         return;
       }
     }
-    
+
     Button_geral();
     Button_Seg();
     contagem_tempo_incoder_virtual();
     contador++;
+
+    // Para eixo por eixo ao atingir o limite aprendido
+    if (!ptEncDone && incoder_virtual_encosto_service >= fim_encosto_encoder) {
+      setOutputPin(Rele_DE, false, "PT_LIM");
+      ptEncDone = true;
+      Serial.println("[PT] Encosto atingiu o limite aprendido - relé desligado");
+    }
+    if (!ptAssDone && incoder_virtual_asento_service >= fim_asento_encoder) {
+      setOutputPin(Rele_SA, false, "PT_LIM");
+      ptAssDone = true;
+      Serial.println("[PT] Assento atingiu o limite aprendido - relé desligado");
+    }
+    if (!ptPerDone && incoder_virtual_perneira_service >= fim_perneira_encoder) {
+      setOutputPin(Rele_SP, false, "PT_LIM");
+      ptPerDone = true;
+      Serial.println("[PT] Perneira atingiu o limite aprendido - relé desligado");
+    }
+
+    // Todos os eixos no limite: finaliza antes do tempo
+    if (ptEncDone && ptAssDone && ptPerDone) {
+      setOutputPin(Rele_SA, false, "PT");
+      setOutputPin(Rele_DE, false, "PT");
+      setOutputPin(Rele_SP, false, "PT");
+      cont13 = 0;
+      contador = 0;
+
+      bip();
+      buzzerPulseStop();
+      faz_bt_seg = 0;
+      Serial.println("[PT] Todos os eixos no limite aprendido - Fim PT");
+      enviarBLE("PT:DONE");
+      break;
+    }
 
     // Proteção contra overflow (15 segundos = 15000ms)
     if (contador >= 15000 || contador < 0) {
@@ -5854,37 +6301,54 @@ void executa_pt() {
 // ========== EXECUÃ‡ÃƒO DA MEMÃ“RIA M1 (via botÃ£o fÃ­sico) ==========
 void executa_M1() {
   buttonState = digitalRead(M1);
+  uint32_t m1HoldStart = millis();
+  bool modoGravar = false;
   while (buttonState == LOW) {
     buttonState = digitalRead(M1);
     cont12++;
+    yield();  // Alimenta watchdog / evita starvation do IDLE
+
+    // [SEGURANCA] Se botao ficar preso >15s, aborta para nao travar o loop
+    if (millis() - m1HoldStart > 15000) {
+      Serial.println("[ERRO_M1] Botao M1 preso em LOW por 15s - abortando para evitar watchdog!");
+      cont12 = 0;
+      faz_m1 = false;
+      return;
+    }
 
     if (cont12 < 500) {
       Serial.println("Contando tempo botao Memoria 1");
       Serial.print("cont12 = ");
       Serial.println(cont12);
     } else {
-      Serial.println("Executando M1");
-      faz_m1 = true;
-      bip();
-      delay(200);
-      bip();
-      delay(200);
-      cont12 = 0;
-
-      Serial.println("Executando Memoria 1");
-      Serial.print("Posicao do encosto = ");
-      Serial.println(incoder_virtual_encosto_service);
-      Serial.print("Posicao do assento = ");
-      Serial.println(incoder_virtual_asento_service);
-      Serial.print("Posicao da perneira = ");
-      Serial.println(incoder_virtual_perneira_service);
+      // Segurou o botao: entra em modo GRAVACAO
+      if (!modoGravar) {
+        modoGravar = true;
+        Serial.println("[M1] Modo GRAVAR - solte o botao para salvar a posicao atual");
+        bip();
+        delay(200);
+        bip();
+        delay(200);
+      }
     }
   }
 
   cont12 = 0;
 
-  // Se pressionou rÃ¡pido, salva a posiÃ§Ã£o atual
-  if (faz_m1 == false) {
+  // Toque rapido (nao segurou): executa a memoria salva
+  if (!modoGravar) {
+    faz_m1 = true;
+    Serial.println("[M1] Toque rapido - executando Memoria 1");
+    Serial.print("Posicao alvo encosto = ");
+    Serial.println(incoder_virtual_encosto_M1);
+    Serial.print("Posicao alvo assento = ");
+    Serial.println(incoder_virtual_asento_M1);
+    Serial.print("Posicao alvo perneira = ");
+    Serial.println(incoder_virtual_perneira_M1);
+  }
+
+  // Se segurou o botao, salva a posiÃ§Ã£o atual
+  if (modoGravar) {
     incoder_virtual_encosto_M1 = incoder_virtual_encosto_service;
     incoder_virtual_asento_M1 = incoder_virtual_asento_service;
     incoder_virtual_perneira_M1 = incoder_virtual_perneira_service;
@@ -6023,35 +6487,54 @@ void executa_M1() {
 }
 
 // ========== PARADA DE EMERGÃŠNCIA (AT_SEG) ==========
+void desligaTodosReles(const char* src) {
+  Serial.println("\n[EMERGENCIA] ========== DESLIGANDO TODOS OS RELES ==========");
+  Serial.print("[EMERGENCIA] Origem: ");
+  Serial.println(src ? src : "DESCONHECIDO");
+  
+  setOutputPin(Rele_DE, false, src);
+  setOutputPin(Rele_SE, false, src);
+  setOutputPin(Rele_SA, false, src);
+  setOutputPin(Rele_DA, false, src);
+  setOutputPin(Rele_SP, false, src);
+  setOutputPin(Rele_DP, false, src);
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, src);
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, src);
+
+  estado_de = false;
+  estado_se = false;
+  estado_sa = false;
+  estado_da = false;
+  estado_sp = false;
+  estado_dp = false;
+  estado_trend_sobe = false;
+  estado_trend_desce = false;
+
+  buzzerPulseStop();
+  faz_bt_seg = 0;
+  cont = 0;
+  cont13 = 0;
+  
+  Serial.println("[EMERGENCIA] Todos os reles desligados com sucesso");
+  Serial.println("[EMERGENCIA] ===============================================\n");
+}
+
 void AT_SEG() {
+  Serial.println("\n[ALARME] ======== BOTAO DE EMERGENCIA ACIONADO ========");
+  Serial.println("[ALARME] Parada de emergencia ativada!");
+  
   if (faz_bt_seg == 1) {
-    Serial.println("Parando todos os movimentos");
+    Serial.println("[ALARME] Movimento em andamento - parando agora!");
     enviarBLE("AT_SEG:STOPPING");
-
-    setOutputPin(Rele_DE, false, "AT_SEG");
-    setOutputPin(Rele_SE, false, "AT_SEG");
-    setOutputPin(Rele_SA, false, "AT_SEG");
-    setOutputPin(Rele_DA, false, "AT_SEG");
-    setOutputPin(Rele_SP, false, "AT_SEG");
-    setOutputPin(Rele_DP, false, "AT_SEG");
-    if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "AT_SEG");
-    if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "AT_SEG");
-
-    // Atualiza estados
-    estado_de = false;
-    estado_se = false;
-    estado_sa = false;
-    estado_da = false;
-    estado_sp = false;
-    estado_dp = false;
-    estado_trend_sobe = false;
-    estado_trend_desce = false;
-
-    faz_bt_seg = 0;
-    cont = 0;
-    cont13 = 0;
+  } else {
+    Serial.println("[ALARME] Nenhum movimento ativo no momento");
   }
+  
+  desligaTodosReles("AT_SEG");
   delay(100);
+  
+  Serial.println("[ALARME] Parada de emergencia concluida");
+  Serial.println("[ALARME] ===============================================\n");
 }
 
 // ========== BIP (buzzer) ==========
@@ -6072,38 +6555,165 @@ void monitoraSistema() {
   if (millis() - ultimoMonitoramentoSistema < INTERVALO_MONITORAMENTO) return;
   ultimoMonitoramentoSistema = millis();
 
-  Serial.println("--- MONITORAMENTO DO SISTEMA ---");
-  Serial.print("Free Heap: "); Serial.print(ESP.getFreeHeap() / 1024); Serial.println(" KB");
-  Serial.print("Min Free Heap: "); Serial.print(ESP.getMinFreeHeap() / 1024); Serial.println(" KB");
-  Serial.print("WiFi Status: "); 
+  Serial.println("\n========== MONITORAMENTO DO SISTEMA ==========");
+  Serial.print("[DIAG] Uptime: "); Serial.print(millis() / 1000); Serial.println(" segundos");
+  Serial.print("[DIAG] Free Heap: "); Serial.print(ESP.getFreeHeap() / 1024); Serial.println(" KB");
+  Serial.print("[DIAG] Min Free Heap: "); Serial.print(ESP.getMinFreeHeap() / 1024); Serial.println(" KB");
+  Serial.print("[DIAG] Chip Revision: "); Serial.println(ESP.getChipRevision());
+  Serial.print("[DIAG] CPU Freq: "); Serial.print(ESP.getCpuFreqMHz()); Serial.println(" MHz");
+  
+#if OFFLINE_MODE
+  Serial.println("[DIAG] WiFi Status: DESABILITADO (OFFLINE_MODE)");
+#else
+  Serial.print("[DIAG] WiFi Status: "); 
   switch(WiFi.status()) {
     case WL_CONNECTED: Serial.println("CONECTADO"); break;
     case WL_DISCONNECTED: Serial.println("DESCONECTADO"); break;
     case WL_CONNECTION_LOST: Serial.println("CONEXAO PERDIDA"); break;
-    default: Serial.println(WiFi.status()); break;
+    case WL_NO_SSID_AVAIL: Serial.println("SSID NAO ENCONTRADO"); break;
+    case WL_IDLE_STATUS: Serial.println("IDLE"); break;
+    default: 
+      Serial.print("CODIGO=");
+      Serial.println(WiFi.status());
+      break;
   }
+  
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("IP: "); Serial.println(WiFi.localIP());
-    Serial.print("RSSI: "); Serial.println(WiFi.RSSI());
+    Serial.print("[DIAG] IP: "); Serial.println(WiFi.localIP());
+    Serial.print("[DIAG] RSSI: "); Serial.println(WiFi.RSSI());
+    Serial.print("[DIAG] SSID: "); Serial.println(WiFi.SSID());
   }
+#endif
+  
 #if HAS_BLE
-  Serial.print("BLE Status: "); 
+  Serial.print("[DIAG] BLE Status: "); 
   Serial.println(bleClienteConectado ? "CONECTADO" : "AGUARDANDO CONEXAO");
   if (bleClienteConectado && pServer != NULL) {
-    Serial.print("BLE Clientes: "); 
+    Serial.print("[DIAG] BLE Clientes: "); 
     Serial.println(pServer->getConnectedCount());
   }
 #else
-  Serial.println("BLE Status: NA");
+  Serial.println("[DIAG] BLE Status: DESABILITADO (OFFLINE_MODE)");
 #endif
-  Serial.print("Horimetro: "); Serial.println(horimetro);
-  Serial.print("Cadeira Habilitada: "); Serial.println(cadeiraHabilitada ? "SIM" : "NAO");
+
+  Serial.print("[DIAG] Horimetro: "); Serial.println(horimetro);
+  Serial.print("[DIAG] Horimetro acumulado (ms): "); Serial.println(totalMillisMotor);
+  Serial.print("[DIAG] Cadeira Habilitada: "); Serial.println(cadeiraHabilitada ? "SIM" : "NAO");
+  
   if (!cadeiraHabilitada && !buzzerTestEnabled) {
+    Serial.println("[ALARME] Cadeira desabilitada! Emitindo bipes...");
     bip(); delay(120);
     bip(); delay(120);
     bip();
   }
-  Serial.print("MQTT Status: ");
+  
+  // Status dos motores
+  Serial.println("\n[DIAG] === STATUS DOS MOTORES ===");
+  Serial.print("[MOTOR] SE (Encosto Desce): "); Serial.println(estado_se ? "ATIVO" : "INATIVO");
+  Serial.print("[MOTOR] DE (Encosto Sobe): "); Serial.println(estado_de ? "ATIVO" : "INATIVO");
+  Serial.print("[MOTOR] SA (Assento Sobe): "); Serial.println(estado_sa ? "ATIVO" : "INATIVO");
+  Serial.print("[MOTOR] DA (Assento Desce): "); Serial.println(estado_da ? "ATIVO" : "INATIVO");
+  Serial.print("[MOTOR] SP (Perneira Sobe): "); Serial.println(estado_sp ? "ATIVO" : "INATIVO");
+  Serial.print("[MOTOR] DP (Perneira Desce): "); Serial.println(estado_dp ? "ATIVO" : "INATIVO");
+  
+  if (trendInputsConfigured()) {
+    Serial.print("[MOTOR] Trend Sobe: "); Serial.println(estado_trend_sobe ? "ATIVO" : "INATIVO");
+    Serial.print("[MOTOR] Trend Desce: "); Serial.println(estado_trend_desce ? "ATIVO" : "INATIVO");
+  }
+  
+  // Posições dos encoders
+  Serial.println("\n[DIAG] === POSICOES DOS ENCODERS ===");
+  Serial.print("[ENC] Encosto: "); Serial.println(incoder_virtual_encosto_service);
+  Serial.print("[ENC] Assento: "); Serial.println(incoder_virtual_asento_service);
+  Serial.print("[ENC] Perneira: "); Serial.println(incoder_virtual_perneira_service);
+  
+  // Limites configurados
+  Serial.println("\n[DIAG] === LIMITES DOS ENCODERS ===");
+  Serial.print("[ENC] Encosto Max: "); Serial.println(fim_encosto_encoder);
+  Serial.print("[ENC] Assento Max: "); Serial.println(fim_asento_encoder);
+  Serial.print("[ENC] Perneira Max: "); Serial.println(fim_perneira_encoder);
+  
+  // Trava de botões
+  Serial.println("\n[DIAG] === TRAVAS DE BOTOES ===");
+  Serial.print("[TRAVA] SE: "); Serial.println(trava_bt_SE ? "TRAVADO" : "LIBERADO");
+  Serial.print("[TRAVA] DE: "); Serial.println(trava_bt_DE ? "TRAVADO" : "LIBERADO");
+  Serial.print("[TRAVA] SA: "); Serial.println(trava_bt_SA ? "TRAVADO" : "LIBERADO");
+  Serial.print("[TRAVA] DA: "); Serial.println(trava_bt_DA ? "TRAVADO" : "LIBERADO");
+  Serial.print("[TRAVA] SP: "); Serial.println(trava_bt_SP ? "TRAVADO" : "LIBERADO");
+  Serial.print("[TRAVA] DP: "); Serial.println(trava_bt_DP ? "TRAVADO" : "LIBERADO");
+  
+  // Gaveta
+  if (GAVETA >= 0) {
+    Serial.println("\n[DIAG] === GAVETA ===");
+    Serial.print("[GAVETA] Pino: "); Serial.println(GAVETA);
+    Serial.print("[GAVETA] Estado: "); Serial.println(isGavetaAbertaRaw() ? "ABERTA" : "FECHADA");
+    Serial.print("[GAVETA] Trava ignorada: "); Serial.println(ignoreGavetaLock ? "SIM" : "NAO");
+  }
+  
+  // I2C/PCF8574 Status
+#if USE_PCF8574
+  Serial.println("\n[DIAG] === I2C/PCF8574 ===");
+  Serial.print("[I2C] SDA: GPIO"); Serial.println(I2C_SDA);
+  Serial.print("[I2C] SCL: GPIO"); Serial.println(I2C_SCL);
+  Serial.print("[I2C] Clock: "); Serial.print(I2C_CLOCK_HZ); Serial.println(" Hz");
+  Serial.print("[I2C] Bus pronto: "); Serial.println(i2cReady ? "SIM" : "NAO");
+  Serial.print("[PCF8574] Disponivel: "); Serial.println(pcf8574Available ? "SIM" : "NAO");
+  Serial.print("[PCF8574] Endereco: 0x"); Serial.println(PCF8574_ADDRESS, HEX);
+  Serial.print("[PCF8574] Usa interrupcao: "); Serial.println(pcf8574UseInterrupt ? "SIM" : "NAO");
+  if (pcf8574Available) {
+    Serial.print("[PCF8574] IN cache: 0x"); Serial.println(pcf8574CachedIn, HEX);
+    Serial.print("[PCF8574] OUT: 0x"); Serial.println(pcf8574Out, HEX);
+  }
+#endif
+  
+  // Trendelenburg
+  if (trendInputsConfigured()) {
+    Serial.println("\n[DIAG] === TRENDELENBURG ===");
+    Serial.print("[TREND] Inputs configurados: SIM");
+    if (TREN_INT_DESCE >= 0) {
+      Serial.print("[TREND] TREN_INT_DESCE(GPIO"); Serial.print(TREN_INT_DESCE); Serial.print(")=");
+      Serial.println(digitalRead(TREN_INT_DESCE) == HIGH ? "1" : "0");
+    }
+    if (INT_TREND_DESCE >= 0) {
+      Serial.print("[TREND] INT_TREND_DESCE(GPIO"); Serial.print(INT_TREND_DESCE); Serial.print(")=");
+      Serial.println(digitalRead(INT_TREND_DESCE) == HIGH ? "1" : "0");
+    }
+    if (TREN_INT_SOBE >= 0) {
+      Serial.print("[TREND] TREN_INT_SOBE(GPIO"); Serial.print(TREN_INT_SOBE); Serial.print(")=");
+      Serial.println(digitalRead(TREN_INT_SOBE) == HIGH ? "1" : "0");
+    }
+    if (INT_TREND_SOBE >= 0) {
+      Serial.print("[TREND] INT_TREND_SOBE(GPIO"); Serial.print(INT_TREND_SOBE); Serial.print(")=");
+      Serial.println(digitalRead(INT_TREND_SOBE) == HIGH ? "1" : "0");
+    }
+  }
+  
+  // Pulsos dos encoders
+  Serial.println("\n[DIAG] === PULSOS DOS ENCODERS ===");
+  Serial.print("[ENC_PULSE] Encosto: "); Serial.println(pulses_encosto);
+  Serial.print("[ENC_PULSE] Assento: "); Serial.println(pulses_assento);
+  Serial.print("[ENC_PULSE] Perneira: "); Serial.println(pulses_perneira);
+  if (ENCODER_TREND >= 0) {
+    Serial.print("[ENC_PULSE] Trend: "); Serial.println(pulses_trend);
+  }
+  
+  // Motor travel statistics
+  Serial.println("\n[DIAG] === ESTATISTICAS DE MOVIMENTO ===");
+  Serial.print("[TRAVEL] Encosto (pulsos): "); Serial.println(motorTravelPulsesEncosto);
+  Serial.print("[TRAVEL] Assento (pulsos): "); Serial.println(motorTravelPulsesAssento);
+  Serial.print("[TRAVEL] Perneira (pulsos): "); Serial.println(motorTravelPulsesPerneira);
+  if (ENCODER_TREND >= 0) {
+    Serial.print("[TRAVEL] Trend (pulsos): "); Serial.println(motorTravelPulsesTrend);
+  }
+  Serial.print("[TRAVEL] mm/pulso Encosto: "); Serial.println(mmPerPulseEncosto, 6);
+  Serial.print("[TRAVEL] mm/pulso Assento: "); Serial.println(mmPerPulseAssento, 6);
+  Serial.print("[TRAVEL] mm/pulso Perneira: "); Serial.println(mmPerPulsePerneira, 6);
+  if (ENCODER_TREND >= 0) {
+    Serial.print("[TRAVEL] mm/pulso Trend: "); Serial.println(mmPerPulseTrend, 6);
+  }
+  
+#if !OFFLINE_MODE
+  Serial.print("\n[DIAG] MQTT Status: ");
   bool mqttConnected = mqttClient.connected();
   String hostSnapshot;
   uint16_t portSnapshot = 0;
@@ -6163,11 +6773,7 @@ void monitoraSistema() {
   
   Serial.print("Proximo envio horimetro: "); Serial.print(tempoAteProximoHorimetro); Serial.println("s");
   Serial.print("Proxima verificacao status: "); Serial.print(tempoAteProximaVerificacao); Serial.println("s");
-  
-#if USE_PCF8574
-  // Removido a impressao constante daqui
 #endif
 
-  Serial.println("--------------------------------");
+  Serial.println("=============================================\n");
 }
-
