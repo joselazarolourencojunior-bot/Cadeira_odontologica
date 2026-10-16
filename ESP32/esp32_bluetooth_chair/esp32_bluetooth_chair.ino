@@ -32,9 +32,9 @@
 #define PORTS_ONLY 0
 #define PORTS_VERIFY 0
 #define TEST_MODE 0
-#define PIN_ENCODER1 4
-#define PIN_ENCODER2 17
-#define PIN_ENCODER3 19
+#define PIN_ENCODER1 19   // PCI: encoder do ASSENTO chega no GPIO19 (confirmado por teste)
+#define PIN_ENCODER2 41   // PCI: encoder da PERNEIRA chega no GPIO41 (conforme esquematico)
+#define PIN_ENCODER3 17   // PCI: encoder do ENCOSTO chega no GPIO17 (conforme esquematico)
 #define PIN_RELE_SA 16
 #define PIN_RELE_DA 9
 #define PIN_RELE_SE 5
@@ -144,19 +144,19 @@ static const int IO_PCF_BASE = 100;
 #endif
 
 #ifndef PIN_ENCODER1
-#define PIN_ENCODER1 4
+#define PIN_ENCODER1 19
 #endif
 
 #ifndef PIN_ENCODER2
-#define PIN_ENCODER2 17
+#define PIN_ENCODER2 41
 #endif
 
 #ifndef PIN_ENCODER3
-#define PIN_ENCODER3 19
+#define PIN_ENCODER3 17
 #endif
 
 #ifndef PIN_ENCODER_TREND
-#define PIN_ENCODER_TREND 46
+#define PIN_ENCODER_TREND 38   // PCI: encoder do TREND chega no GPIO38 (conforme esquematico)
 #endif
 
 #ifndef I2C_SDA
@@ -776,8 +776,9 @@ void Watch_Dog();
 void monitora_tempo_rele();
 void Button_Seg();
 void iniciaCalibracaoSeNecessario();
-void executaCalibracao();
+void executaCalibracao(bool vzJaFeito = false);
 void resetCalibracao();
+void verificaResetCalibracaoBoot();
 void Button_geral();
 void executa_vz();
 void executa_vz_ini();
@@ -805,6 +806,7 @@ void publicaStatusMQTT();
 extern int incoder_virtual_encosto_service;
 extern int incoder_virtual_asento_service;
 extern int incoder_virtual_perneira_service;
+extern int incoder_virtual_trend_service;
 extern bool estado_r;
 extern bool estado_sp;
 extern bool estado_dp;
@@ -1833,6 +1835,7 @@ static bool isGavetaAbertaRaw() {
 extern int fim_encosto_encoder;
 extern int fim_asento_encoder;
 extern int fim_perneira_encoder;
+extern int fim_trend_encoder;
 
 static void loadCalibracaoLimites() {
   Preferences p;
@@ -1847,16 +1850,20 @@ static void loadCalibracaoLimites() {
   int enc = p.getInt("encosto_max", fim_encosto_encoder);
   int ass = p.getInt("assento_max", fim_asento_encoder);
   int per = p.getInt("perneira_max", fim_perneira_encoder);
+  int tre = p.getInt("trend_max", fim_trend_encoder);
   p.end();
   if (enc > 0) fim_encosto_encoder = enc;
   if (ass > 0) fim_asento_encoder = ass;
   if (per > 0) fim_perneira_encoder = per;
+  if (tre > 0) fim_trend_encoder = tre;
   Serial.print("[CAL] Limites carregados ENC=");
   Serial.print(fim_encosto_encoder);
   Serial.print(" ASS=");
   Serial.print(fim_asento_encoder);
   Serial.print(" PER=");
-  Serial.println(fim_perneira_encoder);
+  Serial.print(fim_perneira_encoder);
+  Serial.print(" TRE=");
+  Serial.println(fim_trend_encoder);
 }
 
 static void loadMqttPreferences() {
@@ -2251,16 +2258,25 @@ int contador21 = 0;
 int incoder_virtual_encosto_M1 = 0;
 int incoder_virtual_asento_M1 = 0;
 int incoder_virtual_perneira_M1 = 0;
+// Memoria PT (posicao de trabalho) - segunda memoria do usuario
+int incoder_virtual_encosto_PT = 0;
+int incoder_virtual_asento_PT = 0;
+int incoder_virtual_perneira_PT = 0;
+int incoder_virtual_trend_PT = 0;
+bool m1Salvo = false;
+bool ptSalvo = false;
 int cont_bt_m1 = 0;
 int incoder_virtual_encosto_service = 0;
 int incoder_virtual_asento_service = 0;
 int incoder_virtual_perneira_service = 0;
+int incoder_virtual_trend_service = 0;
 int cont12 = 0;
 
 // Limites do encoder virtual
 int fim_encosto_encoder = 0;
 int fim_asento_encoder = 0;
 int fim_perneira_encoder = 0;
+int fim_trend_encoder = 0;
 static bool calibrationInProgress = false;
 
 int cont13 = 0;
@@ -2329,7 +2345,12 @@ unsigned long ultimoComandoSP = 0;
 unsigned long ultimoComandoDP = 0;
 unsigned long ultimoComandoTrendSobe = 0;
 unsigned long ultimoComandoTrendDesce = 0;
-const uint32_t VZ_MAX_TIME_MS = 15000;
+const uint32_t VZ_MAX_TIME_MS = 50000;
+const uint32_t PT_MAX_TIME_MS = 50000;
+const uint32_t CAL_WINDOW_MS = 55000;
+const uint32_t CAL_STALL_MS = 2500;
+const uint32_t CAL_MIN_WINDOW_MS = 15000;
+const int CAL_MARGIN_PULSES = 4;
 
 // Flags para controle de fim de curso do encoder
 bool en_SA_acabou = false;
@@ -2513,20 +2534,26 @@ void setup() {
   } else {
     Serial.println("[GAVETA] DESABILITADO");
   }
-  pinMode(ENCODER1, INPUT_PULLUP);
-  Serial.print("[DEBUG] ENCODER1 configurado (GPIO");
-  Serial.print(ENCODER1);
-  Serial.println(")");
+  if (ENCODER1 >= 0) {
+    pinMode(ENCODER1, INPUT_PULLUP);
+    Serial.print("[DEBUG] ENCODER1 configurado (GPIO");
+    Serial.print(ENCODER1);
+    Serial.println(")");
+  }
   
-  pinMode(ENCODER2, INPUT_PULLUP);
-  Serial.print("[DEBUG] ENCODER2 configurado (GPIO");
-  Serial.print(ENCODER2);
-  Serial.println(")");
+  if (ENCODER2 >= 0) {
+    pinMode(ENCODER2, INPUT_PULLUP);
+    Serial.print("[DEBUG] ENCODER2 configurado (GPIO");
+    Serial.print(ENCODER2);
+    Serial.println(")");
+  }
   
-  pinMode(ENCODER3, INPUT_PULLUP);
-  Serial.print("[DEBUG] ENCODER3 configurado (GPIO");
-  Serial.print(ENCODER3);
-  Serial.println(")");
+  if (ENCODER3 >= 0) {
+    pinMode(ENCODER3, INPUT_PULLUP);
+    Serial.print("[DEBUG] ENCODER3 configurado (GPIO");
+    Serial.print(ENCODER3);
+    Serial.println(")");
+  }
   
   if (ENCODER_TREND >= 0) {
     pinMode(ENCODER_TREND, INPUT_PULLUP);
@@ -2697,7 +2724,8 @@ void setup() {
   setCpuFrequencyMhz(240);
   Serial.println("[DEBUG] CPU configurado para 240MHz");
   Serial.println("[DEBUG] Comandos via Serial (115200): SE DE SA DA SP DP STOP VZ PT M1 STATUS I2C_SCAN PCF8574_BTNS GPIO_BTNS");
-  executa_vz_ini();
+  verificaResetCalibracaoBoot();
+  // VZ inicial no boot removido: a cadeira nao se move mais automaticamente ao ligar.
   // Primeira vez: aprende o curso total (VZ -> PT contando pulsos -> volta VZ)
   iniciaCalibracaoSeNecessario();
   Serial.println("\n========================================");
@@ -2811,11 +2839,9 @@ void setup() {
   }
 
   Serial.println("\n====================================");
-  Serial.println("  EXECUTANDO VZ INICIAL");
-  Serial.println("  (APOS WiFi/MQTT/Supabase)");
+  Serial.println("  VZ INICIAL NO BOOT DESABILITADO");
   Serial.println("====================================");
-  executa_vz_ini();
-  Serial.println("[OK] VZ inicial finalizado.");
+  Serial.println("[INFO] VZ inicial no boot removido - cadeira inicia parada.");
   Serial.println("====================================\n");
   
   Serial.println("\n====================================");
@@ -3367,11 +3393,34 @@ void resetCalibracao() {
   p.remove("encosto_max");
   p.remove("assento_max");
   p.remove("perneira_max");
+  p.remove("trend_max");
   p.end();
   fim_encosto_encoder = 0;
   fim_asento_encoder = 0;
   fim_perneira_encoder = 0;
+  fim_trend_encoder = 0;
   Serial.println("[CAL] Dados de calibracao apagados (cal_done, *_max).");
+}
+
+// Janela de 5s apos o boot: se o botao BOOT (GPIO0) ficar pressionado,
+// apaga a calibracao para forcar novo aprendizado de curso.
+// ATENCAO: o BOOT deve ser pressionado APOS o reset (com o firmware rodando),
+// nao durante - senao a placa entra em modo de gravacao.
+void verificaResetCalibracaoBoot() {
+  pinMode(0, INPUT_PULLUP);
+  Serial.println("[BOOT] Janela de 5s: segure o botao BOOT (GPIO0) para RESETAR a calibracao...");
+  uint32_t t0 = millis();
+  while (millis() - t0 < 5000) {
+    if (digitalRead(0) == LOW) {
+      Serial.println("[BOOT] Botao BOOT detectado! Resetando calibracao...");
+      bipLong();
+      resetCalibracao();
+      Serial.println("[BOOT] Calibracao apagada - aprendizado sera refeito neste boot.");
+      return;
+    }
+    delay(50);
+  }
+  Serial.println("[BOOT] Nenhum reset solicitado - seguindo boot normal.");
 }
 
 // ========== BLUETOOTH - PROCESSA COMANDOS DO APP ==========
@@ -4935,6 +4984,11 @@ static bool supabaseLoadMemoryPositionFromDb(int slot) {
   preferences.putInt("encoder_perneira", incoder_virtual_perneira_M1);
   preferences.end();
 
+  m1Salvo = true;
+  preferences.begin("cadeira", false);
+  preferences.putBool("m1_saved", true);
+  preferences.end();
+
   Serial.print("[M] DB->M");
   Serial.print(slot);
   Serial.print(" ENC ");
@@ -5200,8 +5254,31 @@ void carregaPreferencias() {
   preferences.begin("encoder_pern", false);
   incoder_virtual_perneira_M1 = preferences.getInt("encoder_perneira", 0);
   preferences.end();
-  
+
+  // Flag de memoria M1 gravada (posicoes != 0 contam como gravada p/ memorias antigas)
+  preferences.begin("cadeira", false);
+  m1Salvo = preferences.getBool("m1_saved", false);
+  preferences.end();
+  if (!m1Salvo && (incoder_virtual_encosto_M1 != 0 || incoder_virtual_asento_M1 != 0 || incoder_virtual_perneira_M1 != 0)) {
+    m1Salvo = true;
+    preferences.begin("cadeira", false);
+    preferences.putBool("m1_saved", true);
+    preferences.end();
+    Serial.println("[PREF] Memoria M1 antiga detectada - flag m1_saved gravada");
+  }
+
+  // Memoria PT (posicao de trabalho)
+  preferences.begin("memoria_pt", false);
+  ptSalvo = preferences.getBool("saved", false);
+  incoder_virtual_encosto_PT = preferences.getInt("enc", 0);
+  incoder_virtual_asento_PT = preferences.getInt("ass", 0);
+  incoder_virtual_perneira_PT = preferences.getInt("per", 0);
+  incoder_virtual_trend_PT = preferences.getInt("tre", 0);
+  preferences.end();
+
   Serial.println("\n[PREF] === POSICOES MEMORIA 1 ===");
+  Serial.print("[PREF] M1 gravada: ");
+  Serial.println(m1Salvo ? "SIM" : "NAO");
   Serial.print("[PREF] Encoder encosto M1: ");
   Serial.println(incoder_virtual_encosto_M1);
   Serial.print("[PREF] Encoder assento M1: ");
@@ -5209,120 +5286,215 @@ void carregaPreferencias() {
   Serial.print("[PREF] Encoder perneira M1: ");
   Serial.println(incoder_virtual_perneira_M1);
 
+  Serial.println("\n[PREF] === POSICOES MEMORIA PT ===");
+  Serial.print("[PREF] PT gravada: ");
+  Serial.println(ptSalvo ? "SIM" : "NAO");
+  Serial.print("[PREF] Encoder encosto PT: ");
+  Serial.println(incoder_virtual_encosto_PT);
+  Serial.print("[PREF] Encoder assento PT: ");
+  Serial.println(incoder_virtual_asento_PT);
+  Serial.print("[PREF] Encoder perneira PT: ");
+  Serial.println(incoder_virtual_perneira_PT);
+  Serial.print("[PREF] Encoder trend PT: ");
+  Serial.println(incoder_virtual_trend_PT);
+
   // Carrega horÃ­metro
   carregaHorimetro();
   Serial.println("[PREF] ============================================\n");
 }
 
-// ========== EXECUÃ‡ÃƒO M1 VIA BLUETOOTH (sem esperar botÃ£o fÃ­sico) ==========
-void executa_M1_bluetooth() {
-  bip();
-  
-  Serial.println("Executando Memoria 1 via Bluetooth");
-  faz_bt_seg = 1;
-  
+// ========== MOVIMENTO PARA POSICAO MEMORIZADA (usa encoders reais) ==========
+static void memDesligaReles(const char* src) {
+  setOutputPin(Rele_DE, false, src);
+  setOutputPin(Rele_SE, false, src);
+  setOutputPin(Rele_SA, false, src);
+  setOutputPin(Rele_DA, false, src);
+  setOutputPin(Rele_SP, false, src);
+  setOutputPin(Rele_DP, false, src);
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, src);
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, src);
+}
+
+// Move encosto/assento/perneira (e opcionalmente trend) ate as posicoes alvo.
+static void executaMovimentoParaPosicoes(int alvoEnc, int alvoAss, int alvoPer, int alvoTre, bool usarTrend, const char* tag) {
+  const unsigned long MOV_TIMEOUT_MS = 60000;
+  const unsigned long MOV_STALL_MS  = 3000;
+  const int MOV_TOL = 3;
+
+  unsigned long startMs = millis();
+  bool doneE = false, doneA = false, doneP = false, doneT = !usarTrend;
+  uint32_t lastP[4] = { pulses_encosto, pulses_assento, pulses_perneira, pulses_trend };
+  unsigned long lastMove[4] = { startMs, startMs, startMs, startMs };
+
+  Serial.print("["); Serial.print(tag);
+  Serial.println("] Movendo ate a posicao memorizada (pulsos reais do encoder)");
+  Serial.print("["); Serial.print(tag); Serial.print("] Alvos ENC=");
+  Serial.print(alvoEnc); Serial.print(" ASS="); Serial.print(alvoAss);
+  Serial.print(" PER="); Serial.print(alvoPer); Serial.print(" TRE=");
+  Serial.println(alvoTre);
+
   while (true) {
     Watch_Dog();
-    
-    // Verifica parada de emergÃªncia via BLE
+    contagem_tempo_incoder_virtual();
+
+    // Cancelamento via botao de seguranca
+    faz_bt_seg = 1;
+    Button_Seg();
+    if (faz_bt_seg == 0) {
+      memDesligaReles(tag);
+      Serial.print("["); Serial.print(tag); Serial.println("] Movimento cancelado pelo botao de seguranca");
+      bip(); delay(700); bip();
+      return;
+    }
+
+    // Cancelamento via BLE
     if (comandoBLE.length() > 0) {
       String cmd = comandoBLE;
       comandoBLE = "";
       cmd.trim();
       cmd.toUpperCase();
       if (cmd == "AT_SEG" || cmd == "STOP") {
+        memDesligaReles(tag);
         AT_SEG();
         return;
       }
     }
-    
-    // Movimento do encosto
-    if (incoder_virtual_encosto_service > incoder_virtual_encosto_M1) {
-      setOutputPin(Rele_DE, true, "M1");
-      delay(250);
-      incoder_virtual_encosto_service--;
-      Serial.print("Encosto posicao: ");
-      Serial.println(incoder_virtual_encosto_service);
-    } else {
-      setOutputPin(Rele_DE, false, "M1");
-      en_DE_acabou = true;
-    }
 
-    if (incoder_virtual_encosto_service < incoder_virtual_encosto_M1) {
-      setOutputPin(Rele_SE, true, "M1");
-      delay(250);
-      incoder_virtual_encosto_service++;
-      Serial.print("Encosto posicao: ");
-      Serial.println(incoder_virtual_encosto_service);
-    } else {
-      setOutputPin(Rele_SE, false, "M1");
-      en_SE_acabou = true;
-    }
-
-    // Movimento do assento
-    if (incoder_virtual_asento_service > incoder_virtual_asento_M1) {
-      setOutputPin(Rele_DA, true, "M1");
-      delay(250);
-      incoder_virtual_asento_service--;
-      Serial.print("Assento posicao: ");
-      Serial.println(incoder_virtual_asento_service);
-    } else {
-      setOutputPin(Rele_DA, false, "M1");
-      en_DA_acabou = true;
-    }
-
-    if (incoder_virtual_asento_service < incoder_virtual_asento_M1) {
-      setOutputPin(Rele_SA, true, "M1");
-      delay(250);
-      incoder_virtual_asento_service++;
-      Serial.print("Assento posicao: ");
-      Serial.println(incoder_virtual_asento_service);
-    } else {
-      setOutputPin(Rele_SA, false, "M1");
-      en_SA_acabou = true;
-    }
-
-    // Movimento da perneira
-    if (incoder_virtual_perneira_service > incoder_virtual_perneira_M1) {
-      setOutputPin(Rele_DP, true, "M1");
-      delay(250);
-      incoder_virtual_perneira_service--;
-      Serial.print("Perneira posicao: ");
-      Serial.println(incoder_virtual_perneira_service);
-    } else {
-      setOutputPin(Rele_DP, false, "M1");
-      en_DP_acabou = true;
-    }
-
-    if (incoder_virtual_perneira_service < incoder_virtual_perneira_M1) {
-      setOutputPin(Rele_SP, true, "M1");
-      delay(250);
-      incoder_virtual_perneira_service++;
-      Serial.print("Perneira posicao: ");
-      Serial.println(incoder_virtual_perneira_service);
-    } else {
-      setOutputPin(Rele_SP, false, "M1");
-      en_SP_acabou = true;
-    }
-
-    // Verifica se todos os movimentos terminaram
-    if (en_SE_acabou && en_DE_acabou && en_SA_acabou && en_DA_acabou && en_SP_acabou && en_DP_acabou) {
-      en_SP_acabou = false;
-      en_DP_acabou = false;
-      en_SE_acabou = false;
-      en_DE_acabou = false;
-      en_SA_acabou = false;
-      en_DA_acabou = false;
-      
-      faz_bt_seg = 0;
-      bip();
-      delay(300);
-      bip();
-      
-      Serial.println("Memoria 1 concluida");
+    unsigned long now = millis();
+    if (now - startMs > MOV_TIMEOUT_MS) {
+      memDesligaReles(tag);
+      Serial.print("["); Serial.print(tag); Serial.println("] TIMEOUT - movimento abortado (60s)");
       return;
     }
+
+    uint32_t cur[4] = { pulses_encosto, pulses_assento, pulses_perneira, pulses_trend };
+    for (int i = 0; i < 4; i++) {
+      if (cur[i] != lastP[i]) { lastP[i] = cur[i]; lastMove[i] = now; }
+    }
+
+    // Encosto: posicao alta -> desce (SE) | posicao baixa -> sobe (DE)
+    if (!doneE) {
+      if (incoder_virtual_encosto_service > alvoEnc + MOV_TOL) {
+        setOutputPin(Rele_DE, false, tag);
+        setOutputPin(Rele_SE, true, tag);
+      } else if (incoder_virtual_encosto_service < alvoEnc - MOV_TOL) {
+        setOutputPin(Rele_SE, false, tag);
+        setOutputPin(Rele_DE, true, tag);
+      } else {
+        setOutputPin(Rele_SE, false, tag);
+        setOutputPin(Rele_DE, false, tag);
+        doneE = true;
+        Serial.print("["); Serial.print(tag); Serial.print("] Encosto na posicao: ");
+        Serial.println(incoder_virtual_encosto_service);
+      }
+      if (!doneE && (now - lastMove[0] > MOV_STALL_MS)) {
+        setOutputPin(Rele_SE, false, tag);
+        setOutputPin(Rele_DE, false, tag);
+        doneE = true;
+        Serial.print("["); Serial.print(tag); Serial.println("] Encosto sem pulsos - eixo abortado");
+      }
+    }
+
+    // Assento: posicao alta -> desce (DA) | posicao baixa -> sobe (SA)
+    if (!doneA) {
+      if (incoder_virtual_asento_service > alvoAss + MOV_TOL) {
+        setOutputPin(Rele_SA, false, tag);
+        setOutputPin(Rele_DA, true, tag);
+      } else if (incoder_virtual_asento_service < alvoAss - MOV_TOL) {
+        setOutputPin(Rele_DA, false, tag);
+        setOutputPin(Rele_SA, true, tag);
+      } else {
+        setOutputPin(Rele_SA, false, tag);
+        setOutputPin(Rele_DA, false, tag);
+        doneA = true;
+        Serial.print("["); Serial.print(tag); Serial.print("] Assento na posicao: ");
+        Serial.println(incoder_virtual_asento_service);
+      }
+      if (!doneA && (now - lastMove[1] > MOV_STALL_MS)) {
+        setOutputPin(Rele_SA, false, tag);
+        setOutputPin(Rele_DA, false, tag);
+        doneA = true;
+        Serial.print("["); Serial.print(tag); Serial.println("] Assento sem pulsos - eixo abortado");
+      }
+    }
+
+    // Perneira: posicao alta -> desce (DP) | posicao baixa -> sobe (SP)
+    if (!doneP) {
+      if (incoder_virtual_perneira_service > alvoPer + MOV_TOL) {
+        setOutputPin(Rele_SP, false, tag);
+        setOutputPin(Rele_DP, true, tag);
+      } else if (incoder_virtual_perneira_service < alvoPer - MOV_TOL) {
+        setOutputPin(Rele_DP, false, tag);
+        setOutputPin(Rele_SP, true, tag);
+      } else {
+        setOutputPin(Rele_SP, false, tag);
+        setOutputPin(Rele_DP, false, tag);
+        doneP = true;
+        Serial.print("["); Serial.print(tag); Serial.print("] Perneira na posicao: ");
+        Serial.println(incoder_virtual_perneira_service);
+      }
+      if (!doneP && (now - lastMove[2] > MOV_STALL_MS)) {
+        setOutputPin(Rele_SP, false, tag);
+        setOutputPin(Rele_DP, false, tag);
+        doneP = true;
+        Serial.print("["); Serial.print(tag); Serial.println("] Perneira sem pulsos - eixo abortado");
+      }
+    }
+
+    // Trend: posicao alta -> desce | posicao baixa -> sobe
+    if (!doneT) {
+      if (incoder_virtual_trend_service > alvoTre + MOV_TOL) {
+        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, tag);
+        if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, true, tag);
+      } else if (incoder_virtual_trend_service < alvoTre - MOV_TOL) {
+        if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, tag);
+        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, true, tag);
+      } else {
+        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, tag);
+        if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, tag);
+        doneT = true;
+        Serial.print("["); Serial.print(tag); Serial.print("] Trend na posicao: ");
+        Serial.println(incoder_virtual_trend_service);
+      }
+      if (!doneT && (now - lastMove[3] > MOV_STALL_MS)) {
+        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, tag);
+        if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, tag);
+        doneT = true;
+        Serial.print("["); Serial.print(tag); Serial.println("] Trend sem pulsos - eixo abortado");
+      }
+    }
+
+    if (doneE && doneA && doneP && doneT) {
+      memDesligaReles(tag);
+      faz_bt_seg = 0;
+      bip(); delay(300); bip();
+      Serial.print("["); Serial.print(tag); Serial.println("] Movimento concluido");
+      return;
+    }
+    delay(10);
   }
+}
+
+static void executaM1Movimento() {
+  executaMovimentoParaPosicoes(incoder_virtual_encosto_M1,
+                             incoder_virtual_asento_M1,
+                             incoder_virtual_perneira_M1,
+                             0, false, "M1");
+}
+
+// ========== EXECUÃ‡ÃƒO M1 VIA BLUETOOTH (sem esperar botÃ£o fÃ­sico) ==========
+void executa_M1_bluetooth() {
+  bip();
+  if (!m1Salvo) {
+    Serial.println("[M1] ERRO: nenhuma posicao gravada na memoria 1");
+    bipLong();
+    enviarBLE("M1:NOT_SAVED");
+    return;
+  }
+  Serial.println("Executando Memoria 1 via Bluetooth");
+  faz_bt_seg = 1;
+  executaM1Movimento();
+  enviarBLE("M1:DONE");
 }
 
 // ========== FUNÃ‡Ã•ES DO ENCODER VIRTUAL ==========
@@ -5333,16 +5505,19 @@ void contagem_tempo_incoder_virtual() {
   bool dir_asento_down = (digitalRead(Rele_DA) == HIGH);
   bool dir_perneira_up = (digitalRead(Rele_SP) == HIGH);
   bool dir_perneira_down = releLigado(Rele_DP);
+  bool dir_trend_up = (Rele_TREND_SOBE >= 0 && digitalRead(Rele_TREND_SOBE) == HIGH);
+  bool dir_trend_down = (Rele_TREND_DESCE >= 0 && digitalRead(Rele_TREND_DESCE) == HIGH);
 
   // [DEBUG] Deteccao de motor travado / encoder com defeito:
   // Se um rele de motor esta ligado ha mais de 2s e nenhum pulso chegou, algo esta errado
-  static uint32_t motorSemPulsoDesde[3] = {0, 0, 0}; // 0=encosto, 1=assento, 2=perneira
-  static bool stallAlertado[3] = {false, false, false};
+  static uint32_t motorSemPulsoDesde[4] = {0, 0, 0, 0}; // 0=encosto, 1=assento, 2=perneira, 3=trend
+  static bool stallAlertado[4] = {false, false, false, false};
   uint32_t agoraEnc = millis();
 
   bool encostoAtivo = dir_encosto_up || dir_encosto_down;
   bool assentoAtivo = dir_asento_up || dir_asento_down;
   bool perneiraAtivo = dir_perneira_up || dir_perneira_down;
+  bool trendAtivo = dir_trend_up || dir_trend_down;
 
   // Encosto
   if (encostoAtivo) {
@@ -5374,10 +5549,20 @@ void contagem_tempo_incoder_virtual() {
     }
   } else { motorSemPulsoDesde[2] = 0; stallAlertado[2] = false; }
 
-  uint32_t d_encosto = pulses_encosto - last_pulses_encosto;
-  uint32_t d_asento = pulses_assento - last_pulses_assento;
-  uint32_t d_perneira = pulses_perneira - last_pulses_perneira;
-  uint32_t d_trend = pulses_trend - last_pulses_trend_travel;
+  // Trend
+  if (trendAtivo) {
+    if (motorSemPulsoDesde[3] == 0) motorSemPulsoDesde[3] = agoraEnc;
+    else if ((agoraEnc - motorSemPulsoDesde[3]) > 2000 && !stallAlertado[3]) {
+      stallAlertado[3] = true;
+      Serial.println("[ERRO_ENC] ALARME: Rele do TREND ligado ha 2s SEM pulsos do encoder!");
+      Serial.println("[ERRO_ENC] Possivel: motor travado, encoder desconectado/quebrado ou fim de curso fisico");
+    }
+  } else { motorSemPulsoDesde[3] = 0; stallAlertado[3] = false; }
+
+  uint32_t d_encosto = (pulses_encosto >= last_pulses_encosto) ? pulses_encosto - last_pulses_encosto : 0;
+  uint32_t d_asento = (pulses_assento >= last_pulses_assento) ? pulses_assento - last_pulses_assento : 0;
+  uint32_t d_perneira = (pulses_perneira >= last_pulses_perneira) ? pulses_perneira - last_pulses_perneira : 0;
+  uint32_t d_trend = (pulses_trend >= last_pulses_trend_travel) ? pulses_trend - last_pulses_trend_travel : 0;
   last_pulses_encosto = pulses_encosto;
   last_pulses_assento = pulses_assento;
   last_pulses_perneira = pulses_perneira;
@@ -5387,6 +5572,7 @@ void contagem_tempo_incoder_virtual() {
   if (d_encosto > 0) { motorSemPulsoDesde[0] = 0; stallAlertado[0] = false; }
   if (d_asento > 0) { motorSemPulsoDesde[1] = 0; stallAlertado[1] = false; }
   if (d_perneira > 0) { motorSemPulsoDesde[2] = 0; stallAlertado[2] = false; }
+  if (d_trend > 0) { motorSemPulsoDesde[3] = 0; stallAlertado[3] = false; }
 
   if (d_encosto) {
     motorTravelPulsesEncosto += d_encosto;
@@ -5426,7 +5612,7 @@ void contagem_tempo_incoder_virtual() {
 
   if (d_encosto) {
     if (dir_encosto_up) {
-      if (calibrationInProgress || incoder_virtual_encosto_service + (int)d_encosto <= fim_encosto_encoder) {
+      if (calibrationInProgress || fim_encosto_encoder <= 0 || incoder_virtual_encosto_service + (int)d_encosto <= fim_encosto_encoder) {
         incoder_virtual_encosto_service += (int)d_encosto;
         trava_bt_SE = false;
       } else {
@@ -5440,15 +5626,17 @@ void contagem_tempo_incoder_virtual() {
         trava_bt_DE = false;
       } else {
         incoder_virtual_encosto_service = 0;
-        setOutputPin(Rele_SE, false, "LIMIT");
-        trava_bt_SE = true;
+        if (fim_encosto_encoder > 0 && !calibrationInProgress && !vzInicialEmAndamento) {
+          setOutputPin(Rele_SE, false, "LIMIT");
+          trava_bt_SE = true;
+        }
       }
     }
   }
 
   if (d_asento) {
     if (dir_asento_up) {
-      if (calibrationInProgress || incoder_virtual_asento_service + (int)d_asento <= fim_asento_encoder) {
+      if (calibrationInProgress || fim_asento_encoder <= 0 || incoder_virtual_asento_service + (int)d_asento <= fim_asento_encoder) {
         incoder_virtual_asento_service += (int)d_asento;
         trava_bt_DA = false; trava_bt_SA = false;
       } else {
@@ -5462,15 +5650,17 @@ void contagem_tempo_incoder_virtual() {
         trava_bt_SA = false; trava_bt_DA = false;
       } else {
         incoder_virtual_asento_service = 0;
-        setOutputPin(Rele_DA, false, "LIMIT");
-        trava_bt_DA = true;
+        if (fim_asento_encoder > 0 && !calibrationInProgress && !vzInicialEmAndamento) {
+          setOutputPin(Rele_DA, false, "LIMIT");
+          trava_bt_DA = true;
+        }
       }
     }
   }
 
   if (d_perneira) {
     if (dir_perneira_up) {
-      if (calibrationInProgress || incoder_virtual_perneira_service + (int)d_perneira <= fim_perneira_encoder) {
+      if (calibrationInProgress || fim_perneira_encoder <= 0 || incoder_virtual_perneira_service + (int)d_perneira <= fim_perneira_encoder) {
         incoder_virtual_perneira_service += (int)d_perneira;
         trava_bt_DP = false; trava_bt_SP = false;
       } else {
@@ -5484,8 +5674,30 @@ void contagem_tempo_incoder_virtual() {
         trava_bt_SP = false; trava_bt_DP = false;
       } else {
         incoder_virtual_perneira_service = 0;
-        setOutputPin(Rele_DP, false, "LIMIT");
-        trava_bt_DP = true;
+        if (fim_perneira_encoder > 0 && !calibrationInProgress && !vzInicialEmAndamento) {
+          setOutputPin(Rele_DP, false, "LIMIT");
+          trava_bt_DP = true;
+        }
+      }
+    }
+  }
+
+  if (d_trend) {
+    if (dir_trend_up) {
+      if (calibrationInProgress || fim_trend_encoder <= 0 || incoder_virtual_trend_service + (int)d_trend <= fim_trend_encoder) {
+        incoder_virtual_trend_service += (int)d_trend;
+      } else {
+        incoder_virtual_trend_service = fim_trend_encoder;
+        if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "LIMIT");
+      }
+    } else if (dir_trend_down) {
+      if (incoder_virtual_trend_service - (int)d_trend >= 0) {
+        incoder_virtual_trend_service -= (int)d_trend;
+      } else {
+        incoder_virtual_trend_service = 0;
+        if (fim_trend_encoder > 0 && !calibrationInProgress && !vzInicialEmAndamento) {
+          if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "LIMIT");
+        }
       }
     }
   }
@@ -5862,125 +6074,152 @@ void iniciaCalibracaoSeNecessario() {
   bool done = p.getBool("cal_done", false);
   p.end();
   if (!done) {
-    executaCalibracao();
+    executaCalibracao(false);  // sem VZ no boot: a calibracao executa o proprio VZ
   }
 }
 
-void executaCalibracao() {
+void executaCalibracao(bool vzJaFeito) {
   Serial.println("\n=== CALIBRACAO AUTOMATICA (primeira vez) ===");
-  Serial.println("Indo para zero (VZ) por 15 segundos...");
   calibrationInProgress = true;
+  encoderPulseDebug = true; // Loga cada pulso durante o aprendizado
   incoder_virtual_encosto_service = 0;
   incoder_virtual_asento_service = 0;
   incoder_virtual_perneira_service = 0;
-  pulses_encosto = pulses_assento = pulses_perneira = 0;
-  last_pulses_encosto = last_pulses_assento = last_pulses_perneira = 0;
+  incoder_virtual_trend_service = 0;
+  pulses_encosto = pulses_assento = pulses_perneira = pulses_trend = 0;
+  last_pulses_encosto = last_pulses_assento = last_pulses_perneira = last_pulses_trend = 0;
+  last_pulses_trend_travel = 0;
   contador2 = 0;
   cont = 1;
-  executa_vz();
+  if (vzJaFeito) {
+    Serial.println("[CAL] VZ inicial ja executado neste boot - pulando etapa de zero");
+  } else {
+    Serial.println("Indo para zero (VZ)...");
+    executa_vz();
+  }
   setOutputPin(Rele_SE, false, "CAL");
   setOutputPin(Rele_DE, false, "CAL");
   setOutputPin(Rele_DA, false, "CAL");
   setOutputPin(Rele_SA, false, "CAL");
   setOutputPin(Rele_DP, false, "CAL");
   setOutputPin(Rele_SP, false, "CAL");
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "CAL");
   delay(200);
   Serial.println("Subindo todos os eixos ate limite (aprendizado)...");
+  Serial.print("[CAL] Janela maxima de "); Serial.print(CAL_WINDOW_MS/1000); Serial.println("s.");
+  Serial.println("[CAL] Cada eixo desliga quando os pulsos cessam (fim de curso fisico).");
+  Serial.print("[CAL] Limite aprendido = pulsos contados - "); Serial.print(CAL_MARGIN_PULSES); Serial.println(" pulsos de margem.");
   unsigned long start = millis();
-  bool doneEnc = false, doneAss = false, donePer = false;
-  bool errEnc = false, errAss = false, errPer = false;
-  bool sawEnc = false, sawAss = false, sawPer = false;
-  unsigned long lastChangeEnc = millis(), lastChangeAss = millis(), lastChangePer = millis();
-  unsigned long startEnc = millis(), startAss = millis(), startPer = millis();
-  uint32_t startPulseEnc = pulses_encosto, startPulseAss = pulses_assento, startPulsePer = pulses_perneira;
-  uint32_t prevPulseEnc = startPulseEnc, prevPulseAss = startPulseAss, prevPulsePer = startPulsePer;
+  uint32_t startPulseEnc = pulses_encosto, startPulseAss = pulses_assento, startPulsePer = pulses_perneira, startPulseTre = pulses_trend;
   setOutputPin(Rele_DE, true, "CAL");
   setOutputPin(Rele_SA, true, "CAL");
   setOutputPin(Rele_SP, true, "CAL");
-  while (!(doneEnc && doneAss && donePer) && (millis() - start) < 30000) {
-    uint32_t pe = pulses_encosto, pa = pulses_assento, pp = pulses_perneira;
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, true, "CAL");
+
+  uint32_t lastSeen[4] = { startPulseEnc, startPulseAss, startPulsePer, startPulseTre };
+  unsigned long lastMoveMs[4] = { start, start, start, start };
+  bool calAxisDone[4] = { false, false, false, false };
+  const int calRele[4] = { Rele_DE, Rele_SA, Rele_SP, Rele_TREND_SOBE };
+  const char* calNome[4] = { "ENCOSTO", "ASSENTO", "PERNEIRA", "TREND" };
+
+  int lastSec = -1;
+  while (millis() - start < CAL_WINDOW_MS) {
     contagem_tempo_incoder_virtual();
-    if (!doneEnc) {
-      if (pe != prevPulseEnc) {
-        lastChangeEnc = millis();
-        sawEnc = true;
-        prevPulseEnc = pe;
-      }
-      if ((millis() - startEnc > 2000) && !sawEnc) {
-        setOutputPin(Rele_DE, false, "CAL");
-        doneEnc = true;
-        errEnc = true;
-        for (int i=0;i<3;i++){ bip(); delay(120);} delay(200); for (int i=0;i<3;i++){ bip(); delay(120);}
-        Serial.println("[ERRO CAL] Encosto: sem pulsos do encoder. Verifique ligacao.");
-      } else if (sawEnc && millis() - lastChangeEnc > 500) {
-        setOutputPin(Rele_DE, false, "CAL");
-        doneEnc = true;
-        Serial.print("Encosto max = "); Serial.println(incoder_virtual_encosto_service);
-      }
-    }
-    if (!doneAss) {
-      if (pa != prevPulseAss) {
-        lastChangeAss = millis();
-        sawAss = true;
-        prevPulseAss = pa;
-      }
-      if ((millis() - startAss > 2000) && !sawAss) {
-        setOutputPin(Rele_SA, false, "CAL");
-        doneAss = true;
-        errAss = true;
-        for (int i=0;i<3;i++){ bip(); delay(120);} delay(200); for (int i=0;i<3;i++){ bip(); delay(120);}
-        Serial.println("[ERRO CAL] Assento: sem pulsos do encoder. Verifique ligacao.");
-      } else if (sawAss && millis() - lastChangeAss > 500) {
-        setOutputPin(Rele_SA, false, "CAL");
-        doneAss = true;
-        Serial.print("Assento max = "); Serial.println(incoder_virtual_asento_service);
+    Watch_Dog();
+    buzzerTestTick();
+    unsigned long nowMs = millis();
+    uint32_t cur[4] = { pulses_encosto, pulses_assento, pulses_perneira, pulses_trend };
+    uint32_t ini[4] = { startPulseEnc, startPulseAss, startPulsePer, startPulseTre };
+    for (int i = 0; i < 4; i++) {
+      if (cur[i] != lastSeen[i]) { lastSeen[i] = cur[i]; lastMoveMs[i] = nowMs; }
+      if (calAxisDone[i]) continue;
+      bool stalled = (cur[i] > ini[i]) && (nowMs - lastMoveMs[i] >= CAL_STALL_MS);
+      bool absent = (cur[i] == ini[i]) && (nowMs - start >= CAL_MIN_WINDOW_MS);
+      if (stalled || absent) {
+        calAxisDone[i] = true;
+        if (calRele[i] >= 0) setOutputPin(calRele[i], false, "CAL");
+        Serial.print("[CAL] "); Serial.print(calNome[i]);
+        if (stalled) {
+          Serial.print(" atingiu o fim de curso (pulsos=");
+          Serial.print((unsigned long)(cur[i] - ini[i]));
+          Serial.println(") - rele desligado");
+        } else {
+          Serial.println(" sem pulsos - rele desligado");
+        }
       }
     }
-    if (!donePer) {
-      if (pp != prevPulsePer) {
-        lastChangePer = millis();
-        sawPer = true;
-        prevPulsePer = pp;
-      }
-      if ((millis() - startPer > 2000) && !sawPer) {
-        setOutputPin(Rele_SP, false, "CAL");
-        donePer = true;
-        errPer = true;
-        for (int i=0;i<3;i++){ bip(); delay(120);} delay(200); for (int i=0;i<3;i++){ bip(); delay(120);}
-        Serial.println("[ERRO CAL] Perneira: sem pulsos do encoder. Verifique ligacao.");
-      } else if (sawPer && millis() - lastChangePer > 500) {
-        setOutputPin(Rele_SP, false, "CAL");
-        donePer = true;
-        Serial.print("Perneira max = "); Serial.println(incoder_virtual_perneira_service);
-      }
+    if (calAxisDone[0] && calAxisDone[1] && calAxisDone[2] && calAxisDone[3]) {
+      Serial.println("[CAL] Todos os eixos concluidos - encerrando aprendizado antes do tempo limite.");
+      break;
+    }
+    int sec = (millis() - start) / 1000;
+    if (sec != lastSec && sec % 5 == 0) {
+      lastSec = sec;
+      Serial.printf("[CAL] t=%ds | ENC=%lu ASS=%lu PER=%lu TRE=%lu\n", sec,
+                    (unsigned long)(pulses_encosto - startPulseEnc),
+                    (unsigned long)(pulses_assento - startPulseAss),
+                    (unsigned long)(pulses_perneira - startPulsePer),
+                    (unsigned long)(pulses_trend - startPulseTre));
     }
     delay(10);
   }
   setOutputPin(Rele_DE, false, "CAL");
   setOutputPin(Rele_SA, false, "CAL");
   setOutputPin(Rele_SP, false, "CAL");
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "CAL");
+  uint32_t dEnc = pulses_encosto - startPulseEnc;
+  uint32_t dAss = pulses_assento - startPulseAss;
+  uint32_t dPer = pulses_perneira - startPulsePer;
+  uint32_t dTre = pulses_trend - startPulseTre;
+  bool errEnc = (dEnc == 0);
+  bool errAss = (dAss == 0);
+  bool errPer = (dPer == 0);
+  bool errTre = (dTre == 0);
+  int maxEnc = (dEnc > (uint32_t)CAL_MARGIN_PULSES) ? (int)(dEnc - CAL_MARGIN_PULSES) : (int)dEnc;
+  int maxAss = (dAss > (uint32_t)CAL_MARGIN_PULSES) ? (int)(dAss - CAL_MARGIN_PULSES) : (int)dAss;
+  int maxPer = (dPer > (uint32_t)CAL_MARGIN_PULSES) ? (int)(dPer - CAL_MARGIN_PULSES) : (int)dPer;
+  int maxTre = (dTre > (uint32_t)CAL_MARGIN_PULSES) ? (int)(dTre - CAL_MARGIN_PULSES) : (int)dTre;
+  incoder_virtual_encosto_service = maxEnc;
+  incoder_virtual_asento_service = maxAss;
+  incoder_virtual_perneira_service = maxPer;
+  incoder_virtual_trend_service = maxTre;
+  Serial.print("Encosto max = "); Serial.print(maxEnc); Serial.print(" (pulsos brutos="); Serial.print(dEnc); Serial.println(")");
+  Serial.print("Assento max = "); Serial.print(maxAss); Serial.print(" (pulsos brutos="); Serial.print(dAss); Serial.println(")");
+  Serial.print("Perneira max = "); Serial.print(maxPer); Serial.print(" (pulsos brutos="); Serial.print(dPer); Serial.println(")");
+  Serial.print("Trend max = "); Serial.print(maxTre); Serial.print(" (pulsos brutos="); Serial.print(dTre); Serial.println(")");
+  if (errEnc) Serial.println("[ERRO CAL] Encosto: sem pulsos do encoder. Verifique ligacao.");
+  if (errAss) Serial.println("[ERRO CAL] Assento: sem pulsos do encoder. Verifique ligacao.");
+  if (errPer) Serial.println("[ERRO CAL] Perneira: sem pulsos do encoder. Verifique ligacao.");
+  if (errTre) Serial.println("[ERRO CAL] Trend: sem pulsos do encoder. Verifique ligacao.");
   calibrationInProgress = false;
-  if (errEnc || errAss || errPer) {
-    Serial.println("[ERRO CAL] Calibracao incompleta. Pelo menos um encoder nao gerou pulsos.");
+  bool algumAprendeu = !(errEnc && errAss && errPer && errTre);
+  if (!algumAprendeu) {
+    Serial.println("[ERRO CAL] Calibracao falhou. Nenhum encoder gerou pulsos.");
     for (int i=0;i<5;i++){ bip(); delay(120);}
   } else {
+    if (errEnc || errAss || errPer || errTre) {
+      Serial.println("[CAL] Calibracao PARCIAL - salvando apenas os eixos que geraram pulsos.");
+    }
     Preferences p;
     p.begin("cadeira", false);
-    p.putInt("encosto_max", incoder_virtual_encosto_service);
-    p.putInt("assento_max", incoder_virtual_asento_service);
-    p.putInt("perneira_max", incoder_virtual_perneira_service);
+    if (!errEnc) { p.putInt("encosto_max", maxEnc); fim_encosto_encoder = maxEnc; }
+    if (!errAss) { p.putInt("assento_max", maxAss); fim_asento_encoder = maxAss; }
+    if (!errPer) { p.putInt("perneira_max", maxPer); fim_perneira_encoder = maxPer; }
+    if (!errTre) { p.putInt("trend_max", maxTre);   fim_trend_encoder = maxTre; }
     p.putBool("cal_done", true);
     p.end();
-    fim_encosto_encoder = incoder_virtual_encosto_service;
-    fim_asento_encoder = incoder_virtual_asento_service;
-    fim_perneira_encoder = incoder_virtual_perneira_service;
-    trava_bt_DE = true;
-    trava_bt_SA = true;
-    trava_bt_SP = true;
+    if (!errEnc) trava_bt_DE = true; else trava_bt_DE = false;
+    if (!errAss) trava_bt_SA = true; else trava_bt_SA = false;
+    if (!errPer) trava_bt_SP = true; else trava_bt_SP = false;
     trava_bt_SE = false;
     trava_bt_DA = false;
     trava_bt_DP = false;
-    Serial.println("[OK] Calibracao concluida e salva.");
+    if (errEnc || errAss || errPer || errTre) {
+      Serial.println("[OK] Calibracao parcial salva. Eixos sem encoder podem ser calibrados depois (reset pelo BOOT).");
+    } else {
+      Serial.println("[OK] Calibracao concluida e salva.");
+    }
 
     // Retorna para VZ e fica aguardando comandos
     Serial.println("[CAL] Retornando para posicao VZ...");
@@ -5996,14 +6235,16 @@ void executa_vz() {
   bip();
   buzzerPulseStart2s();
 
-  bool checkEnc = (fim_encosto_encoder == 0 && fim_asento_encoder == 0 && fim_perneira_encoder == 0);
+  bool checkEnc = (fim_encosto_encoder == 0 && fim_asento_encoder == 0 && fim_perneira_encoder == 0 && fim_trend_encoder == 0);
   int startEncPos = incoder_virtual_encosto_service;
   int startAssPos = incoder_virtual_asento_service;
   int startPerPos = incoder_virtual_perneira_service;
-  bool canEarlyFinish = (startEncPos != 0 || startAssPos != 0 || startPerPos != 0);
+  int startTrePos = incoder_virtual_trend_service;
+  bool canEarlyFinish = (startEncPos != 0 || startAssPos != 0 || startPerPos != 0 || startTrePos != 0);
   uint32_t startPulseEnc = pulses_encosto;
   uint32_t startPulseAss = pulses_assento;
   uint32_t startPulsePer = pulses_perneira;
+  uint32_t startPulseTre = pulses_trend;
   uint32_t startTime = millis();
   Serial.print("[VZ] TIMEOUT_MS=");
   Serial.print(VZ_MAX_TIME_MS);
@@ -6013,6 +6254,8 @@ void executa_vz() {
   Serial.print(startAssPos);
   Serial.print(" PER=");
   Serial.print(startPerPos);
+  Serial.print(" TRE=");
+  Serial.print(startTrePos);
   Serial.print(" ENC_CHECK=");
   Serial.println(checkEnc ? "1" : "0");
 
@@ -6021,6 +6264,8 @@ void executa_vz() {
   setOutputPin(Rele_SE, true, "VZ");
   delay(250);
   setOutputPin(Rele_DP, true, "VZ");
+  delay(250);
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, true, "VZ");
 
   Serial.println("Executando VZ");
   faz_bt_seg = 1;
@@ -6052,7 +6297,8 @@ void executa_vz() {
     if (canEarlyFinish &&
         incoder_virtual_encosto_service == 0 &&
         incoder_virtual_asento_service == 0 &&
-        incoder_virtual_perneira_service == 0) {
+        incoder_virtual_perneira_service == 0 &&
+        incoder_virtual_trend_service == 0) {
       cont = 0;
     } else if (millis() - startTime >= VZ_MAX_TIME_MS) {
       cont = 0;
@@ -6062,20 +6308,25 @@ void executa_vz() {
   setOutputPin(Rele_DA, false, "VZ");
   setOutputPin(Rele_SE, false, "VZ");
   setOutputPin(Rele_DP, false, "VZ");
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "VZ");
 
   uint32_t dEnc = pulses_encosto - startPulseEnc;
   uint32_t dAss = pulses_assento - startPulseAss;
   uint32_t dPer = pulses_perneira - startPulsePer;
+  uint32_t dTre = pulses_trend - startPulseTre;
   if (checkEnc) {
     Serial.print("[VZ] PULSOS ENC=");
     Serial.print(dEnc);
     Serial.print(" ASS=");
     Serial.print(dAss);
     Serial.print(" PER=");
-    Serial.println(dPer);
+    Serial.print(dPer);
+    Serial.print(" TRE=");
+    Serial.println(dTre);
     if (dEnc == 0) Serial.println("[ERRO ENC] Encosto sem pulso no VZ");
     if (dAss == 0) Serial.println("[ERRO ENC] Assento sem pulso no VZ");
     if (dPer == 0) Serial.println("[ERRO ENC] Perneira sem pulso no VZ");
+    if (dTre == 0) Serial.println("[ERRO ENC] Trend sem pulso no VZ");
   }
 
   bip();
@@ -6087,6 +6338,7 @@ void executa_vz() {
   incoder_virtual_encosto_service = 0;
   incoder_virtual_asento_service = 0;
   incoder_virtual_perneira_service = 0;
+  incoder_virtual_trend_service = 0;
 }
 
 // ========== EXECUÃ‡ÃƒO DA POSIÃ‡ÃƒO INICIAL VZ ==========
@@ -6100,17 +6352,19 @@ void executa_vz_ini() {
   vzInicialEmAndamento = true; // Bloqueia loop() completamente
   
   Serial.println("[INFO] Desabilitando controle de encoder virtual temporariamente...");
-  bool checkEnc = (fim_encosto_encoder == 0 && fim_asento_encoder == 0 && fim_perneira_encoder == 0);
+  bool checkEnc = (fim_encosto_encoder == 0 && fim_asento_encoder == 0 && fim_perneira_encoder == 0 && fim_trend_encoder == 0);
   habilitaEncoderVirtual = checkEnc;
   Serial.print("[VZ_INI] ENC_CHECK=");
   Serial.println(checkEnc ? "1" : "0");
   uint32_t startPulseEnc = pulses_encosto;
   uint32_t startPulseAss = pulses_assento;
   uint32_t startPulsePer = pulses_perneira;
+  uint32_t startPulseTre = pulses_trend;
   int startEncPos = incoder_virtual_encosto_service;
   int startAssPos = incoder_virtual_asento_service;
   int startPerPos = incoder_virtual_perneira_service;
-  bool canEarlyFinish = (startEncPos != 0 || startAssPos != 0 || startPerPos != 0);
+  int startTrePos = incoder_virtual_trend_service;
+  bool canEarlyFinish = (startEncPos != 0 || startAssPos != 0 || startPerPos != 0 || startTrePos != 0);
 
   Serial.println("Ativando Rele_DA...");
   setOutputPin(Rele_DA, true, "VZ_INI");
@@ -6122,6 +6376,10 @@ void executa_vz_ini() {
   
   Serial.println("Ativando Rele_DP...");
   setOutputPin(Rele_DP, true, "VZ_INI");
+  delay(500);
+
+  Serial.println("Ativando Rele_TREND_DESCE...");
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, true, "VZ_INI");
   delay(500);
 
   Serial.print("Aguardando ");
@@ -6143,7 +6401,8 @@ void executa_vz_ini() {
     if (canEarlyFinish &&
         incoder_virtual_encosto_service == 0 &&
         incoder_virtual_asento_service == 0 &&
-        incoder_virtual_perneira_service == 0) {
+        incoder_virtual_perneira_service == 0 &&
+        incoder_virtual_trend_service == 0) {
       break;
     }
     int currentSecond = (millis() - startTime) / 1000;
@@ -6163,20 +6422,25 @@ void executa_vz_ini() {
   setOutputPin(Rele_DA, false, "VZ_INI");
   setOutputPin(Rele_SE, false, "VZ_INI");
   setOutputPin(Rele_DP, false, "VZ_INI");
+  if (Rele_TREND_DESCE >= 0) setOutputPin(Rele_TREND_DESCE, false, "VZ_INI");
 
   if (checkEnc) {
     uint32_t dEnc = pulses_encosto - startPulseEnc;
     uint32_t dAss = pulses_assento - startPulseAss;
     uint32_t dPer = pulses_perneira - startPulsePer;
+    uint32_t dTre = pulses_trend - startPulseTre;
     Serial.print("[VZ_INI] PULSOS ENC=");
     Serial.print(dEnc);
     Serial.print(" ASS=");
     Serial.print(dAss);
     Serial.print(" PER=");
-    Serial.println(dPer);
+    Serial.print(dPer);
+    Serial.print(" TRE=");
+    Serial.println(dTre);
     if (dEnc == 0) Serial.println("[ERRO ENC] Encosto sem pulso no VZ_INI");
     if (dAss == 0) Serial.println("[ERRO ENC] Assento sem pulso no VZ_INI");
     if (dPer == 0) Serial.println("[ERRO ENC] Perneira sem pulso no VZ_INI");
+    if (dTre == 0) Serial.println("[ERRO ENC] Trend sem pulso no VZ_INI");
   }
 
   Serial.println("Fim VZ inicial - Reles desligados");
@@ -6184,6 +6448,7 @@ void executa_vz_ini() {
   incoder_virtual_encosto_service = 0;
   incoder_virtual_asento_service = 0;
   incoder_virtual_perneira_service = 0;
+  incoder_virtual_trend_service = 0;
   Serial.println("Encoders resetados.");
   
   Serial.println("[INFO] Reabilitando controle de encoder virtual.");
@@ -6196,7 +6461,73 @@ void executa_vz_ini() {
 
 // ========== EXECUÃ‡ÃƒO DA POSIÃ‡ÃƒO DE PARTO (PT) ==========
 void executa_pt() {
-  Serial.println("PT acionado");
+  // Mesmo esquema do M1: segurar ~3s = GRAVAR posicao atual | toque = EXECUTAR
+  int contPT = 0;
+  bool modoGravar = false;
+  while (digitalRead(PT) == LOW) {
+    Watch_Dog();
+    delay(10);
+    contPT++;
+    if (contPT < 300) {
+      if (contPT % 50 == 0) {
+        Serial.print("[PT] Contando tempo botao PT: contPT = ");
+        Serial.println(contPT);
+      }
+    } else if (!modoGravar) {
+      modoGravar = true;
+      Serial.println("[PT] Modo GRAVAR - solte o botao para salvar a posicao atual");
+      bip();
+      delay(200);
+      bip();
+      delay(200);
+    }
+  }
+
+  // Segurou o botao: salva a posicao atual como memoria PT (inclui trend)
+  if (modoGravar) {
+    incoder_virtual_encosto_PT = incoder_virtual_encosto_service;
+    incoder_virtual_asento_PT = incoder_virtual_asento_service;
+    incoder_virtual_perneira_PT = incoder_virtual_perneira_service;
+    incoder_virtual_trend_PT = incoder_virtual_trend_service;
+
+    preferences.begin("memoria_pt", false);
+    preferences.putInt("enc", incoder_virtual_encosto_PT);
+    preferences.putInt("ass", incoder_virtual_asento_PT);
+    preferences.putInt("per", incoder_virtual_perneira_PT);
+    preferences.putInt("tre", incoder_virtual_trend_PT);
+    preferences.putBool("saved", true);
+    preferences.end();
+    ptSalvo = true;
+
+    Serial.println("[PT] Posicoes de memoria PT gravadas:");
+    Serial.print("  Encosto = "); Serial.println(incoder_virtual_encosto_PT);
+    Serial.print("  Assento = "); Serial.println(incoder_virtual_asento_PT);
+    Serial.print("  Perneira = "); Serial.println(incoder_virtual_perneira_PT);
+    Serial.print("  Trend = "); Serial.println(incoder_virtual_trend_PT);
+
+    enviarBLE("PT:SAVED");
+    bip();
+    delay(200);
+    bip();
+    return;
+  }
+
+  // Toque rapido com PT gravada: vai ate a posicao memorizada (pulsos reais)
+  if (ptSalvo) {
+    Serial.println("PT acionado - posicao de trabalho gravada");
+    bip();
+    faz_bt_seg = 1;
+    executaMovimentoParaPosicoes(incoder_virtual_encosto_PT,
+                                 incoder_virtual_asento_PT,
+                                 incoder_virtual_perneira_PT,
+                                 incoder_virtual_trend_PT,
+                                 true, "PT");
+    enviarBLE("PT:DONE");
+    return;
+  }
+
+  // Sem PT gravada: comportamento padrao - sobe tudo ate o limite aprendido ou pelo tempo
+  Serial.println("PT acionado - SEM memoria PT gravada (vai ao limite/tempo)");
   bip();
   buzzerPulseStart2s();
 
@@ -6205,6 +6536,8 @@ void executa_pt() {
   setOutputPin(Rele_DE, true, "PT");
   delay(250);
   setOutputPin(Rele_SP, true, "PT");
+  delay(250);
+  if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, true, "PT");
 
   Serial.println("Executando PT");
   faz_bt_seg = 1;
@@ -6214,11 +6547,13 @@ void executa_pt() {
   bool ptEncDone = (fim_encosto_encoder <= 0);
   bool ptAssDone = (fim_asento_encoder <= 0);
   bool ptPerDone = (fim_perneira_encoder <= 0);
-  if (!ptEncDone || !ptAssDone || !ptPerDone) {
+  bool ptTreDone = (fim_trend_encoder <= 0);
+  if (!ptEncDone || !ptAssDone || !ptPerDone || !ptTreDone) {
     Serial.println("[PT] Limites aprendidos ativos - motores param ao atingir o maximo");
     Serial.print("[PT] Encosto max="); Serial.print(fim_encosto_encoder);
     Serial.print(" Assento max="); Serial.print(fim_asento_encoder);
-    Serial.print(" Perneira max="); Serial.println(fim_perneira_encoder);
+    Serial.print(" Perneira max="); Serial.print(fim_perneira_encoder);
+    Serial.print(" Trend max="); Serial.println(fim_trend_encoder);
   } else {
     Serial.println("[PT] Sem memoria de curso - executando por tempo (15s)");
   }
@@ -6264,12 +6599,18 @@ void executa_pt() {
       ptPerDone = true;
       Serial.println("[PT] Perneira atingiu o limite aprendido - relé desligado");
     }
+    if (!ptTreDone && incoder_virtual_trend_service >= fim_trend_encoder) {
+      if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "PT_LIM");
+      ptTreDone = true;
+      Serial.println("[PT] Trend atingiu o limite aprendido - relé desligado");
+    }
 
     // Todos os eixos no limite: finaliza antes do tempo
-    if (ptEncDone && ptAssDone && ptPerDone) {
+    if (ptEncDone && ptAssDone && ptPerDone && ptTreDone) {
       setOutputPin(Rele_SA, false, "PT");
       setOutputPin(Rele_DE, false, "PT");
       setOutputPin(Rele_SP, false, "PT");
+      if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "PT");
       cont13 = 0;
       contador = 0;
 
@@ -6281,11 +6622,12 @@ void executa_pt() {
       break;
     }
 
-    // Proteção contra overflow (15 segundos = 15000ms)
-    if (contador >= 15000 || contador < 0) {
+    // Proteção contra overflow (40 segundos = tempo maximo quando nao ha memoria de curso)
+    if (contador >= (int)PT_MAX_TIME_MS || contador < 0) {
       setOutputPin(Rele_SA, false, "PT");
       setOutputPin(Rele_DE, false, "PT");
       setOutputPin(Rele_SP, false, "PT");
+      if (Rele_TREND_SOBE >= 0) setOutputPin(Rele_TREND_SOBE, false, "PT");
       cont13 = 0;
       contador = 0;
 
@@ -6337,6 +6679,12 @@ void executa_M1() {
 
   // Toque rapido (nao segurou): executa a memoria salva
   if (!modoGravar) {
+    if (!m1Salvo) {
+      Serial.println("[M1] ERRO: nenhuma posicao gravada na memoria 1 - bip de erro");
+      bipLong();
+      enviarBLE("M1:NOT_SAVED");
+      return;
+    }
     faz_m1 = true;
     Serial.println("[M1] Toque rapido - executando Memoria 1");
     Serial.print("Posicao alvo encosto = ");
@@ -6365,6 +6713,11 @@ void executa_M1() {
     preferences.putInt("encoder_perneira", incoder_virtual_perneira_M1);
     preferences.end();
 
+    m1Salvo = true;
+    preferences.begin("cadeira", false);
+    preferences.putBool("m1_saved", true);
+    preferences.end();
+
     Serial.println("Posicoes de memoria gravadas");
     Serial.print("Posicao do encosto na memoria = ");
     Serial.println(incoder_virtual_encosto_M1);
@@ -6381,108 +6734,12 @@ void executa_M1() {
     bip();
   }
 
-  // Se segurou o botÃ£o, executa o movimento para a posiÃ§Ã£o salva
-  while (faz_m1 == true) {
-    Watch_Dog();
-
-    faz_bt_seg = 1;
-    Button_Seg();
-
-    if (faz_bt_seg == 0) {
-      bip();
-      delay(700);
-      bip();
-      faz_m1 = false;
-      return;
-    }
-
-    // Movimento do Encosto
-    if (incoder_virtual_encosto_service > incoder_virtual_encosto_M1) {
-      setOutputPin(Rele_DE, true, "M1");
-      delay(250);
-      incoder_virtual_encosto_service--;
-      Serial.print("Posicao encoder virtual encosto = ");
-      Serial.println(incoder_virtual_encosto_service);
-    } else {
-      setOutputPin(Rele_DE, false, "M1");
-      en_DE_acabou = true;
-    }
-
-    if (incoder_virtual_encosto_service < incoder_virtual_encosto_M1) {
-      setOutputPin(Rele_SE, true, "M1");
-      delay(250);
-      incoder_virtual_encosto_service++;
-      Serial.print("Posicao encoder virtual encosto = ");
-      Serial.println(incoder_virtual_encosto_service);
-    } else {
-      setOutputPin(Rele_SE, false, "M1");
-      en_SE_acabou = true;
-    }
-
-    // Movimento do Assento
-    if (incoder_virtual_asento_service > incoder_virtual_asento_M1) {
-      setOutputPin(Rele_DA, true, "M1");
-      delay(250);
-      incoder_virtual_asento_service--;
-      Serial.print("Posicao encoder virtual assento = ");
-      Serial.println(incoder_virtual_asento_service);
-    } else {
-      setOutputPin(Rele_DA, false, "M1");
-      en_DA_acabou = true;
-    }
-
-    if (incoder_virtual_asento_service < incoder_virtual_asento_M1) {
-      setOutputPin(Rele_SA, true, "M1");
-      delay(250);
-      incoder_virtual_asento_service++;
-      Serial.print("Posicao encoder virtual assento = ");
-      Serial.println(incoder_virtual_asento_service);
-    } else {
-      setOutputPin(Rele_SA, false, "M1");
-      en_SA_acabou = true;
-    }
-
-    // Movimento da Perneira
-    if (incoder_virtual_perneira_service > incoder_virtual_perneira_M1) {
-      setOutputPin(Rele_DP, true, "M1");
-      delay(250);
-      incoder_virtual_perneira_service--;
-      Serial.print("Posicao encoder virtual perneira = ");
-      Serial.println(incoder_virtual_perneira_service);
-    } else {
-      setOutputPin(Rele_DP, false, "M1");
-      en_DP_acabou = true;
-    }
-
-    if (incoder_virtual_perneira_service < incoder_virtual_perneira_M1) {
-      setOutputPin(Rele_SP, true, "M1");
-      delay(250);
-      incoder_virtual_perneira_service++;
-      Serial.print("Posicao encoder virtual perneira = ");
-      Serial.println(incoder_virtual_perneira_service);
-    } else {
-      setOutputPin(Rele_SP, false, "M1");
-      en_SP_acabou = true;
-    }
-
-    // Verifica se todos os movimentos terminaram
-    if (en_SE_acabou == true && en_DE_acabou == true && en_SA_acabou == true && en_DA_acabou == true && en_SP_acabou == true && en_DP_acabou == true) {
-      faz_m1 = false;
-      en_SP_acabou = false;
-      en_DP_acabou = false;
-      en_SE_acabou = false;
-      en_DE_acabou = false;
-      en_SA_acabou = false;
-      en_DA_acabou = false;
-
-      bip();
-      delay(500);
-      bip();
-
-      Serial.println("Fim do movimento da memoria 1");
-      enviarBLE("M1:DONE");
-      return;
-    }
+  // Toque rapido: executa o movimento para a posicao salva
+  if (faz_m1 == true) {
+    faz_m1 = false;
+    executaM1Movimento();
+    enviarBLE("M1:DONE");
+    Serial.println("Fim do movimento da memoria 1");
   }
 }
 
@@ -6626,12 +6883,18 @@ void monitoraSistema() {
   Serial.print("[ENC] Encosto: "); Serial.println(incoder_virtual_encosto_service);
   Serial.print("[ENC] Assento: "); Serial.println(incoder_virtual_asento_service);
   Serial.print("[ENC] Perneira: "); Serial.println(incoder_virtual_perneira_service);
+  if (ENCODER_TREND >= 0) {
+    Serial.print("[ENC] Trend: "); Serial.println(incoder_virtual_trend_service);
+  }
   
   // Limites configurados
   Serial.println("\n[DIAG] === LIMITES DOS ENCODERS ===");
   Serial.print("[ENC] Encosto Max: "); Serial.println(fim_encosto_encoder);
   Serial.print("[ENC] Assento Max: "); Serial.println(fim_asento_encoder);
   Serial.print("[ENC] Perneira Max: "); Serial.println(fim_perneira_encoder);
+  if (ENCODER_TREND >= 0) {
+    Serial.print("[ENC] Trend Max: "); Serial.println(fim_trend_encoder);
+  }
   
   // Trava de botões
   Serial.println("\n[DIAG] === TRAVAS DE BOTOES ===");
